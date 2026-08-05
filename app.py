@@ -400,9 +400,8 @@ with tab_monitoramento:
         except Exception as e:
             st.error(f"Erro ao carregar painel visual: {str(e)}")
 
-# Aba de Histórico SQLite e Auditoria de Cliques
+# ---------------------------------------------------------------------
+# ABA 2: HISTÓRICO SQLITE (CORRIGIDA E ALINHADA RIGOROSAMENTE)
+# ---------------------------------------------------------------------
 with tab_historico:
     st.subheader("🗄️ Histórico de Consultas e Oportunidades Identificadas")
-    st.caption("Todos os sinais identificados pelo scanner no momento em que a página foi carregada ficam registrados abaixo.")
-    df_db = carregar_historico_banco()
-    if not df_db.empty:
