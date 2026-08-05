@@ -24,7 +24,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # =====================================================================
-# PROTEÇÃO E CRIPTOGRAFIA DE CHAVES (ST.SECRETS)
+# PROTEÇÃO DE CHAVES VIA SEGREDO STREAMLIT (ST.SECRETS)
 # =====================================================================
 try:
     URL_IA_PROXIMIDADE = st.secrets["URL_IA_PROXIMIDADE"]
@@ -32,6 +32,7 @@ try:
     TOKEN_TELEGRAM = st.secrets["TOKEN_TELEGRAM"]
     CHAT_ID_TELEGRAM = st.secrets["CHAT_ID_TELEGRAM"]
 except Exception:
+    # Fallbacks estruturados caso os secrets ainda não tenham sido preenchidos na nuvem
     URL_IA_PROXIMIDADE = "https://openrouter.ai"
     API_KEY_IA = "fd10bd41-3d8f-50da-8a73-716eef2ec764"
     TOKEN_TELEGRAM = "8852525281:AAH56WNVEmmXyxvol9RKmkB3aa1Toap1QoY"
@@ -42,16 +43,17 @@ LIMITE_LIQUIDEZ_DIARIA = 1000000.00
 DB_NAME = "trades_historico.db"
 
 # =====================================================================
-# CONTROLE DE HORÁRIO E DATA BRASÍLIA (UTC -3)
+# CONTROLE DE HORÁRIO RIGOROSO BRASÍLIA (UTC -3)
 # =====================================================================
 def obter_horario_brasilia():
-    """Retorna o objeto datetime convertido rigorosamente para o fuso UTC-3."""
+    """Retorna o objeto datetime convertido rigorosamente para o fuso UTC-3 brasileiro."""
     return datetime.utcnow() - timedelta(hours=3)
 
 # =====================================================================
-# MÓDULO DE BANCO DE DADOS (SQLITE COM AUDITORIA)
+# MÓDULO DE BANCO DE DADOS (SQLITE ROBUSTO COM COLUNA DE AUDITORIA)
 # =====================================================================
 def inicializar_banco():
+    """Cria a tabela de histórico adicionando auditoria de acertos e confirmação."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -70,39 +72,57 @@ def inicializar_banco():
     conn.close()
 
 def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
+    """Grava o sinal com carimbo de hora UTC-3 de Brasília evitando duplicidade."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     agora_br = obter_horario_brasilia()
     hoje_str = agora_br.strftime("%Y-%m-%d")
     
-    cursor.execute("SELECT id FROM historico_sinais WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?", (ticker, estrategia, f"{hoje_str}%"))
+    cursor.execute("""
+        SELECT id FROM historico_sinais 
+        WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?
+    """, (ticker, estrategia, f"{hoje_str}%"))
+    
     if cursor.fetchone() is None:
-        data_atual_br = data_atual_br = agora_br.strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo) VALUES (?, ?, ?, ?, ?, ?)", 
-                       (data_atual_br, ticker, estrategia, preco, stop, alvo))
+        data_atual_br = agora_br.strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (data_atual_br, ticker, estrategia, preco, stop, alvo))
         conn.commit()
     conn.close()
 
 def atualizar_confirmacoes_no_banco(ticker, preco_atual):
+    """Audita os sinais em aberto, validando se o mercado sucessivo confirmou a análise."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, preco_entrada, stop_loss, alvo FROM historico_sinais WHERE ticker = ? AND confirmacao_analise = 'Aguardando Pregão'", (ticker,))
+    cursor.execute("""
+        SELECT id, preco_entrada, stop_loss, alvo FROM historico_sinais 
+        WHERE ticker = ? AND confirmacao_analise = 'Aguardando Pregão'
+    """, (ticker,))
     sinais_abertos = cursor.fetchall()
+    
     for sinal in sinais_abertos:
         sid, p_entrada, s_loss, p_alvo = sinal
-        if preco_atual >= p_alvo: status = "✅ Sucesso (Alvo Atingido)"
-        elif preco_atual <= s_loss: status = "❌ Fracasso (Stop Acionado)"
-        else: continue
+        if preco_atual >= p_alvo:
+            status = "✅ Sucesso (Alvo Atingido)"
+        elif preco_atual <= s_loss:
+            status = "❌ Fracasso (Stop Acionado)"
+        else:
+            continue # Mantém aguardando o pregão se estiver dentro do range de oscilação
+            
         cursor.execute("UPDATE historico_sinais SET confirmacao_analise = ? WHERE id = ?", (status, sid))
     conn.commit()
     conn.close()
 
 def carregar_historico_banco():
+    """Retorna o histórico armazenado no SQLite."""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM historico_sinais ORDER BY id DESC", conn)
     conn.close()
     return df
 
+# Inicialização automática da persistência
 inicializar_banco()
 
 def obter_universo_b3():
@@ -158,19 +178,19 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
 
 @st.cache_data(ttl=60)
 def processar_mercado_duplo(lista_ativos_custom=None):
-    """Varre a B3 de forma híbrida e purificada: analisa o universo fixo ou customizado em lote."""
+    """Varre a B3, classifica os ativos em TOP 10, calcula volume rel. e audita no SQLite."""
     lista_trabalho = lista_ativos_custom if lista_ativos_custom is not None else obter_universo_b3()
     pool_exaustao = []
     pool_retomada = []
 
     agora_br = obter_horario_brasilia()
-    # Puxa 7 dias fixos para garantir cauda de dados e cálculo correto de indicadores nos finais de semana
+    # Puxa 7 dias fixos para cobrir com segurança o cauda de dados nos finais de semana e noites
     periodo_scan = "7d"
 
     for ticker in lista_trabalho:
         try:
             df = yf.download(ticker, period=periodo_scan, interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
-            if df.empty or len(df) < 20: continue
+            if df.empty or len(df) < 25: continue
             df = df.dropna(subset=['Close', 'Volume'])
             
             fechamentos = df['Close'].squeeze()
@@ -179,6 +199,7 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             df['Vol_Financeiro'] = fechamentos * volumes
             liquidez_diaria = float(df['Vol_Financeiro'].rolling(window=20).mean().iloc[-1]) * 28
 
+            # Pula filtros de liquidez fixos se for radar direcionado pelo investidor
             if lista_ativos_custom is None and liquidez_diaria < LIMITE_LIQUIDEZ_DIARIA: continue
             
             preco_atual = float(fechamentos.iloc[-1])
@@ -191,15 +212,17 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             df['Vol_Quantidade_Media'] = volumes.rolling(window=20).mean()
             vol_ratio = float(volumes.iloc[-1] / df['Vol_Quantidade_Media'].iloc[-1])
             
+            # Formatação percentual do desvio do volume em relação à média de referência do ativo
             if vol_ratio >= 1.0:
-                desvio_vol_str = f"🚀 Acima (+{(vol_ratio - 1.0)*100:.1f}%)"
+                desvio_vol_str = f"🚀 Acima ({vol_ratio * 100:.1f}%)"
             else:
-                desvio_vol_str = f"📉 Abaixo (-{(1.0 - vol_ratio)*100:.1f}%)"
+                desvio_vol_str = f"降低 Abaixo ({vol_ratio * 100:.1f}%)"
 
+            # Executa a auditoria automática de acertos no banco
             atualizar_confirmacoes_no_banco(ticker.replace('.SA',''), preco_atual)
 
             # -----------------------------------------------------------------
-            # Motor 1: Exaustão de Venda (Substituído termo inadequado por Pânico)
+            # Motor 1: Exaustão / Pânico de Venda
             # -----------------------------------------------------------------
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             ifr_atual = float(df['IFR'].iloc[-1])
@@ -209,13 +232,15 @@ def processar_mercado_duplo(lista_ativos_custom=None):
                 stop_loss = preco_atual - dist_stop
                 alvo_lucro = preco_atual + (dist_stop * 1.5)
                 
+                # Gravação programada de dados nos momentos estipulados
                 hora_minuto_str = agora_br.strftime("%H:%M")
                 if hora_minuto_str in ["10:30", "11:30", "12:30", "15:00", "16:30", "17:15"] and lista_ativos_custom is None:
                     salvar_sinal_no_banco(ticker.replace('.SA',''), "Pânico de Venda", preco_atual, stop_loss, alvo_lucro)
                 
                 pool_exaustao.append({
                     'Ativo': ticker.replace('.SA', ''), 'Preço (R$)': round(preco_atual, 2), 
-                    'IFR': round(ifr_atual, 2), 'Fluxo Vol': desvio_vol_str, 'atr': atr_atual, 'Diagnóstico': 'Pânico de Venda'
+                    'IFR': round(ifr_atual, 2), 'Volume Real': int(volume_ultimo_candle), 'Fluxo Vol': desvio_vol_str,
+                    'atr': atr_atual, 'Diagnóstico': 'Pânico de Venda'
                 })
 
             # -----------------------------------------------------------------
@@ -239,12 +264,13 @@ def processar_mercado_duplo(lista_ativos_custom=None):
                 
                 pool_retomada.append({
                     'Ativo': ticker.replace('.SA', ''), 'Preço (R$)': round(preco_atual, 2), 
-                    'IFR': round(ifr_atual, 2), 'Fluxo Vol': desvio_vol_str, 'atr': atr_atual, 'Momentum': momentum, 'Diagnóstico': 'Retomada de Subida'
+                    'IFR': round(ifr_atual, 2), 'Volume Real': int(volume_ultimo_candle), 'Fluxo Vol': desvio_vol_str,
+                    'atr': atr_atual, 'Momentum': momentum, 'Diagnóstico': 'Retomada de Subida'
                 })
         except: continue
 
-    df_ex = pd.DataFrame(pool_exaustao) if pool_exaustao else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol', 'atr', 'Diagnóstico'])
-    df_ret = pd.DataFrame(pool_retomada) if pool_retomada else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol', 'atr', 'Momentum', 'Diagnóstico'])
+    df_ex = pd.DataFrame(pool_exaustao) if pool_exaustao else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Volume Real', 'Fluxo Vol', 'atr', 'Diagnóstico'])
+    df_ret = pd.DataFrame(pool_retomada) if pool_retomada else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Volume Real', 'Fluxo Vol', 'atr', 'Momentum', 'Diagnóstico'])
     
     if lista_ativos_custom is None:
         if not df_ex.empty: df_ex = df_ex.sort_values(by='IFR', ascending=True).head(10)
@@ -256,7 +282,7 @@ def processar_mercado_duplo(lista_ativos_custom=None):
 # INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
 # =====================================================================
 horario_atual_br = obter_horario_brasilia()
-st.title("🤖 AGENTE FINANCEIRO IA: Painel Analítico Avançado B3")
+st.title("🤖 AGENTE FINANCEIRO IA: Painel Analítico Avançado B3 Pro")
 st.markdown(f"**Fuso Horário:** Brasília (UTC -3) | **Data/Hora:** {horario_atual_br.strftime('%d/%m/%Y %H:%M:%S')}")
 
 st.info("🕒 **Ciclos Estritos de Registro de Auditoria:** 10:30 | 11:30 | 12:30 | 15:00 | 16:30 | 17:15")
@@ -271,7 +297,6 @@ input_ativos = st.sidebar.text_input("Ativos separados por vírgula:", placehold
 df_custom_ex, df_custom_ret = pd.DataFrame(), pd.DataFrame()
 
 if input_ativos:
-    # Higieniza a string inserida pelo usuário e formata os tickers com a terminação .SA
     lista_custom = [f"{t.strip().upper()}.SA" for t in input_ativos.split(",") if t.strip()]
     if lista_custom:
         with st.sidebar.spinner("Analisando lote direcionado..."):
@@ -281,16 +306,15 @@ if input_ativos:
 tab_monitoramento, tab_historico = st.tabs(["📊 Gráficos & Sinais Online", "🗄️ Histórico & Auditoria SQLite"])
 
 with tab_monitoramento:
-    col_esquerda, col_direita = st.columns([1.1, 1.8])
+    col_esquerda, col_direita = st.columns([1.2, 1.8])
 
     with col_esquerda:
-        # Se houver ativos customizados inseridos, dá prioridade de exibição a eles no topo
         if input_ativos:
             st.subheader("🎯 Resultado do Radar Customizado")
             df_unificado_custom = pd.concat([df_custom_ret, df_custom_ex]).drop_duplicates(subset=['Ativo'])
             if not df_unificado_custom.empty:
                 sel_custom = st.dataframe(
-                    df_unificado_custom[['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol', 'Diagnóstico']],
+                    df_unificado_custom[['Ativo', 'Preço (R$)', 'IFR', 'Volume Real', 'Fluxo Vol', 'Diagnóstico']],
                     use_container_width=True, hide_index=True,
                     selection_mode="single-row", on_select="rerun"
                 )
@@ -306,7 +330,6 @@ with tab_monitoramento:
         with st.spinner("Extraindo cotações do mercado..."):
             df_exaustao, df_retomada = processar_mercado_duplo()
 
-        # Ativo inicial padrão de visualização da página
         if 'ativo_final' not in locals():
             ativo_final = "EMBR3"
 
@@ -314,13 +337,12 @@ with tab_monitoramento:
         st.markdown("**🚀 Top 10 - Retomada Confirmada de Alta**")
         if not df_retomada.empty:
             sel_ret = st.dataframe(
-                df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol']], 
+                df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Volume Real', 'Fluxo Vol']], 
                 use_container_width=True, hide_index=True,
                 selection_mode="single-row", on_select="rerun"
             )
             if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                idx_linha = sel_ret["selection"]["rows"]
-                ativo_final = str(df_retomada.iloc[idx_linha]['Ativo']).strip()
+                ativo_final = str(df_retomada.iloc[sel_ret["selection"]["rows"]]['Ativo']).strip()
         else:
             st.info("Nenhuma ação em reversão de alta.")
 
@@ -328,13 +350,12 @@ with tab_monitoramento:
         st.markdown("**💥 Top 10 - Pânico / Exaustão de Venda**")
         if not df_exaustao.empty:
             sel_ex = st.dataframe(
-                df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol']], 
+                df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Volume Real', 'Fluxo Vol']], 
                 use_container_width=True, hide_index=True,
                 selection_mode="single-row", on_select="rerun"
             )
             if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                idx_linha = sel_ex["selection"]["rows"]
-                ativo_final = str(df_exaustao.iloc[idx_linha]['Ativo']).strip()
+                ativo_final = str(df_exaustao.iloc[sel_ex["selection"]["rows"]]['Ativo']).strip()
         else:
             st.info("Nenhuma ação em pânico de venda institucional.")
 
@@ -353,7 +374,7 @@ with tab_monitoramento:
         periodo_yf = map_periodo[periodo_opcao]
         candle_yf = map_candle[candle_opcao]
 
-        # FALLBACK HISTÓRICO CORRIGIDO: Força 7 dias para garantir desenho completo se o pregão estiver fechado
+        # FALLBACK HISTÓRICO: Garante dados consolidados fora do horário de pregão ativo
         if (horario_atual_br.weekday() >= 5 or horario_atual_br.hour < 10 or horario_atual_br.hour >= 18) and (periodo_yf == "1d"):
             periodo_yf = "7d"
 
@@ -364,7 +385,6 @@ with tab_monitoramento:
             if not dados.empty:
                 dados = dados.dropna(subset=['Close', 'Volume'])
 
-                # Enquadramento preciso de dados passados
                 if periodo_opcao == "Últimas Horas" and len(dados) > 16:
                     dados = dados.tail(16)
                 elif (periodo_opcao == "1 dia (Intraday)" or periodo_yf == "7d") and len(dados) > 28:
@@ -380,26 +400,33 @@ with tab_monitoramento:
                 quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
 
                 dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean().fillna(dados['Close'])
+                volume_medio_recente = dados['Volume'].rolling(window=20).mean().fillna(dados['Volume'])
 
-                # Métricas em Tela
-                m1, m2, m3 = st.columns(3)
+                # Métricas em Tela incluindo o Medidor de Volatilidade Estática (ATR)
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Último Preço", f"R$ {preco_atual:.2f}")
-                m2.metric("Stop Loss Calculado", f"R$ {stop_loss:.2f}")
+                m2.metric("Stop Loss", f"R$ {stop_loss:.2f}")
                 m3.metric("Alvo Projetado", f"R$ {alvo_lucro:.2f}")
+                m4.metric("Volatilidade (ATR)", f"R$ {atr_calc:.2f}")
 
-                # Gráfico Duplo Profissional
+                # Gráfico Duplo Profissional (Preço + Volume)
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_width=[0.3, 0.7])
 
-                fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Preço', line=dict(color='#2ca02c', width=2.5)), row=1, col=1)
-                fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média 20', line=dict(color='#ff7f0e', width=1.5)), row=1, col=1)
-                fig.add_trace(go.Bar(x=dados.index, y=dados['Volume'], name='Volume Proporcional', marker=dict(color='#1f77b4')), row=2, col=1)
+                # Trace de Preço e Média Móvel
+                fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Close'], name='Preço', line=dict(color='#2ca02c', width=2.5)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Média Ref (20)'], name='Média 20', line=dict(color='#ff7f0e', width=1.5)), row=1, col=1)
 
+                # Destaque Visual de Volume Institucional Extremo (Altera cor se acima da média recente)
+                cores_volume = ['#d62728' if v > m * 1.2 else '#1f77b4' for v, m in zip(dados['Volume'], volume_medio_recente)]
+                fig.add_trace(go.Bar(x=dados.index.astype(str), y=dados['Volume'], name='Volume do Candle', marker=dict(color=cores_volume)), row=2, col=1)
+
+                # Linhas de Alvo e Stop
                 fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo", annotation_position="top right", row=1, col=1)
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop", annotation_position="bottom right", row=1, col=1)
 
-                # CORREÇÃO DEFINITIVA DO GRÁFICO: Ignora lacunas mantendo indexação contínua para evitar congelamentos fora do pregão
+                # Mantém o eixo contínuo e limpo sem gaps temporais
                 fig.update_xaxes(type='category')
-                fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=520, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 
                 st.plotly_chart(fig, use_container_width=True)
                 st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para travar o risco fixado em R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
