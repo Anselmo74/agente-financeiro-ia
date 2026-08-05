@@ -1,3 +1,4 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -5,72 +6,91 @@ import requests
 import time
 import warnings
 import logging
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import sqlite3
+import plotly.graph_objects as go
 from datetime import datetime
 
-# Silenciar avisos e logs secundários do terminal para performance limpa
+# Configuração de Layout da Página Web (Obrigatório ser o primeiro comando)
+st.set_page_config(
+    page_title="Agente IA Financeiro B3",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Silenciar avisos e logs secundários do terminal
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # =====================================================================
-# CONFIGURAÇÕES MULTICANAL DO USUÁRIO
+# CONFIGURAÇÕES GLOBAIS
 # =====================================================================
-TOKEN_TELEGRAM = "8852525281:AAH56WNVEmmXyxvol9RKmkB3aa1Toap1QoY"
-CHAT_ID_TELEGRAM = "8852525281"
-
-# Endpoint oficial de Chat Completions no OpenRouter
 URL_IA_PROXIMIDADE = "https://openrouter.ai"
 API_KEY_IA = "fd10bd41-3d8f-50da-8a73-716eef2ec764"
 
-# Canais secundários de contingência e segurança
-EMAIL_REMETENTE = "advcorreto@gmail.com"
-EMAIL_DESTINATARIO = "advcorreto@gmail.com"
-SENHA_APP_GMAIL = "COLE_AQUI_SUA_SENHA_DE_APP_DO_GMAIL"
-
-SMS_ACCOUNT_SID = "COLE_AQUI_SEU_TWILIO_ACCOUNT_SID"
-SMS_AUTH_TOKEN = "COLE_AQUI_SEU_TWILIO_AUTH_TOKEN"
-TELEFONE_SMS_ORIGEM = "+1XXXXXXXXXX"
-TELEFONE_DESTINO = "+5534991410631"
-
-# Parâmetros de Gestão de Risco Blindada
 RISCO_MAXIMO_FINANCEIRO = 1000.00
-LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro mínimo de R$ 1 Milhão/dia
+LIMITE_LIQUIDEZ_DIARIA = 1000000.00
 
-def obter_universo_ibov_e_smallcaps():
-    """Gera a lista unificada e sanitizada de ações líquidas da B3."""
+DB_NAME = "trades_historico.db"
+
+def inicializar_banco():
+    """Cria a tabela de histórico se não existir."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historico_sinais (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_hora TEXT,
+            ticker TEXT,
+            estrategia TEXT,
+            preco_entrada REAL,
+            stop_loss REAL,
+            alvo REAL,
+            resultado TEXT DEFAULT 'Aberto'
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
+    """Registra as oportunidades identificadas."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("""
+        SELECT id FROM historico_sinais 
+        WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?
+    """, (ticker, estrategia, f"{hoje}%"))
+    if cursor.fetchone() is None:
+        data_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (data_atual, ticker, estrategia, preco, stop, alvo))
+        conn.commit()
+    conn.close()
+
+def carregar_historico_banco():
+    """Lê o histórico para a aba de auditoria."""
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT * FROM historico_sinais ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+# Inicializa o banco de dados local
+inicializar_banco()
+
+def obter_universo_b3():
+    """Lista higienizada de ativos focos."""
     tickers_base = [
-        "RRRP3", "ALOS3", "ALPA4", "ABEV3", "ARZZ3", "ASAI3", "AZUL4", "B3SA3", "BBSE3", "BBDC3",
-        "BBDC4", "BRAP4", "BBAS3", "BRKM5", "BRFS3", "BPAC11", "CRFB3", "CCRO3", "CMIG4",
-        "COGN3", "CPLE6", "CSAN3", "CPFE3", "CMIN3", "CVCB3", "CYRE3", "DXCO3", "ELET3", "ELET6",
-        "EMBR3", "ENGI11", "ENEV3", "EGIE3", "EQTL3", "EZTC3", "FLRY3", "GGBR4", "GOAU4",
-        "NTCO3", "HAPV3", "HYBR3", "IGTI11", "IRBR3", "ITSA4", "ITUB4", "JBSS3", "JHSF3",
-        "KLBN11", "RENT3", "LREN3", "MDIA3", "MGLU3", "MRVE3", "MULT3", "PCAR3", "PETR3", "PETR4",
-        "RECV3", "PRIO3", "PETZ3", "RADL3", "RAIZ4", "RDOR3", "RAIL3", "SBSP3", "SANB11", "SMTO3",
-        "STBP3", "SUZB3", "TAEE11", "VIVT3", "TIMS3", "TOTS3", "TRPL4", "UGPA3", "USIM5",
-        "VALE3", "VAMO3", "VBBR3", "WEGE3", "YDUQ3", "AERI3", "AURE3", "AMER3", "ARML3",
-        "BLAU3", "CAML3", "CASH3", "CEAB3", "CLSA3", "CSNA3", "CURY3", "DIRR3", "EVEN3", 
-        "FESA4", "FIQE3", "GGRC11", "GMAT3", "GRND3", "GUAR3", "IFCM3", "INTB3", "JALL3",
-        "KEPL3", "LAND3", "LAVV3", "LOGG3", "LOGN3", "AMBP3", "LWSA3", "MATD3", "MEAL3",
-        "MELK3", "MOVI3", "MYPK3", "NEOE3", "ODPV3", "ONCO3", "ORVR3", "PGMN3", "PLPL3",
-        "PNVL3", "POMO4", "POSI3", "PRNR3", "QUAL3", "RAPT4", "RCSL4", "ROMI3", "SEQL3", 
-        "SIMH3", "SLCE3", "TASA4", "TECN3", "TEND3", "TGMA3", "TRIS3", "TTEN3", "TUPY3", 
-        "UNIP6", "VIVA3", "VLID3", "ZAMP3"
+        "CMIN3", "UGPA3", "EMBR3", "VALE3", "PETR4", "ITUB4", "BBDC4", "BBAS3", 
+        "WEGE3", "RENT3", "PRIO3", "SBSP3", "SUZB3", "JBSS3", "LREN3", "RAIL3",
+        "ABEV3", "B3SA3", "BBSE3", "RADL3", "HAPV3", "GGBR4", "CSNA3", "MGLU3"
     ]
     return sorted(list(set([f"{t}.SA" for t in tickers_base])))
 
-def verificar_dia_util():
-    """Valida se o mercado está operando (ignora finais de semana e feriados nacionais)."""
-    hoje = datetime.now()
-    if hoje.weekday() >= 5: return False
-    feriados = ["01-01", "04-21", "05-01", "09-07", "10-12", "11-02", "11-15", "11-20", "12-25"]
-    if hoje.strftime("%m-%d") in feriados: return False
-    return True
-
 def calcular_ifr_professional(series, periodos=14):
-    """Calcula o Índice de Força Relativa com suavização e proteção contra divisão por zero."""
+    """Cálculo do IFR com suavização exponencial."""
     delta = series.diff()
     ganho = delta.clip(lower=0)
     perda = -delta.clip(upper=0)
@@ -84,81 +104,42 @@ def buscar_noticias_reais_yfinance(ticker):
         t = yf.Ticker(ticker)
         noticias = t.news
         if noticias and len(noticias) > 0:
-            manchetes = [n.get('title', '') for n in noticias[:3]]
+            manchetes = [n.get('title', '') for n in noticias[:2]]
             return " | ".join(manchetes)
     except: pass
     return "Nenhuma manchete recente encontrada no feed."
 
 def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
-    """Valida o cenário do ativo consultando a inteligência artificial online."""
+    """Consulta o OpenRouter para interpretar o cenário do papel em 15 palavras."""
     headers = {
         "Authorization": f"Bearer {API_KEY_IA}", 
         "Content-Type": "application/json"
     }
     prompt = (
-        f"Ação: {ticker}. Preço: R$ {preco:.2f}. Manchetes recentes coletadas no book: '{manchetes_reais}'. "
-        f"Com base nessas informações ou no cenário macro atual do Brasil, escreva uma única frase curta de no máximo 15 palavras "
-        f"explicando qual fato corporativo, econômico ou boato justifica a forte oscilação recente deste papel na B3. Seja ultra objetivo."
+        f"Ação: {ticker}. Preço: R$ {preco:.2f}. Manchetes: '{manchetes_reais}'. "
+        f"Explique em uma única frase curta de no máximo 15 palavras qual fato corporativo, "
+        f"econômico ou boato justifica a oscilação recente deste papel na B3. Seja ultra objetivo."
     )
     data = {
         "model": "google/gemma-2-9b-it:free",
         "messages": [{"role": "user", "content": prompt}]
     }
     try:
-        response = requests.post(URL_IA_PROXIMIDADE, headers=headers, json=data, timeout=12)
+        response = requests.post(URL_IA_PROXIMIDADE, headers=headers, json=data, timeout=8)
         if response.status_code == 200:
             return response.json()['choices']['message']['content'].strip()
     except: pass
-    return f"Ajuste técnico de carteiras institucionais perto da faixa de R$ {preco:.2f}."
+    return f"Ajuste técnico de carteiras institucionais perto de R$ {preco:.2f}."
 
-def enviar_telegram(mensagem):
-    """Envia o relatório via endpoint oficial do Telegram Bot API."""
-    url_final = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
-    payload = {"chat_id": CHAT_ID_TELEGRAM, "text": mensagem, "parse_mode": "Markdown"}
-    try: return requests.post(url_final, json=payload, timeout=15).status_code == 200
-    except: return False
-
-def enviar_email(mensagem):
-    """Envia o relatório através do servidor seguro SMTP do Gmail."""
-    if "COLE_AQUI" in SENHA_APP_GMAIL: return False
-    msg = MIMEMultipart()
-    msg['From'] = EMAIL_REMETENTE
-    msg['To'] = EMAIL_DESTINATARIO
-    msg['Subject'] = f"📊 AGENTE B3 INTRADAY: Relatório de Oportunidades - {datetime.now().strftime('%d/%m/%Y')}"
-    msg.attach(MIMEText(mensagem.replace("*", "").replace("_", ""), 'plain'))
-    try:
-        server = smtplib.SMTP('://gmail.com', 587)
-        server.starttls()
-        server.login(EMAIL_REMETENTE, SENHA_APP_GMAIL)
-        server.sendmail(EMAIL_REMETENTE, EMAIL_DESTINATARIO, msg.as_string())
-        server.quit()
-        return True
-    except: return False
-
-def enviar_sms(mensagem):
-    """Envia alertas resumidos via API corporativa do Twilio Gateway."""
-    if "COLE_AQUI" in SMS_ACCOUNT_SID: return False
-    linhas = mensaje.split("\n")
-    resumo_sms = "🤖 ALERTA B3: " + " | ".join([l for l in linhas if "1️⃣" in l or "2️⃣" in l or "3️⃣" in l])
-    url = f"https://twilio.com{SMS_ACCOUNT_SID}/Messages.json"
-    payload = {"To": TELEFONE_DESTINO, "From": TELEFONE_SMS_ORIGEM, "Body": resumo_sms[:160]}
-    try: return requests.post(url, data=payload, auth=(SMS_ACCOUNT_SID, SMS_AUTH_TOKEN), timeout=10).status_code == 201
-    except: return False
-def executar_agente_b3_analista():
-    """Executa a triagem dupla de ativos: Exaustão de Venda e Retomada Confirmada."""
-    if not verificar_dia_util():
-        print("💤 Hoje não é um dia útil de mercado. Agente em modo de espera.")
-        return
-
-    lista_completa_b3 = obter_universo_ibov_e_smallcaps()
+@st.cache_data(ttl=120)
+def processar_mercado_duplo():
+    """Varre o universo selecionado da B3, classifica os ativos e salva no SQLite."""
+    lista_ativos = obter_universo_b3()
     pool_exaustao = []
     pool_retomada = []
 
-    print(f"🤖 Scanner Multíndice Ativo. Processando estratégias de Clímax e Reversão...")
-
-    for ticker in lista_completa_b3:
+    for ticker in lista_ativos:
         try:
-            # Download de dados do intraday (15 minutos)
             df = yf.download(ticker, period="5d", interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
             if df.empty or len(df) < 30: continue
             df = df.dropna(subset=['Close', 'Volume'])
@@ -166,152 +147,216 @@ def executar_agente_b3_analista():
             fechamentos = df['Close'].squeeze()
             volumes = df['Volume'].squeeze()
 
-            # Estimação da liquidez projetada diária real (28 candles de 15m por pregão)
             df['Vol_Financeiro'] = fechamentos * volumes
-            liquidez_media_recente = float(df['Vol_Financeiro'].rolling(window=20).mean().iloc[-1]) * 28
+            liquidez_diaria = float(df['Vol_Financeiro'].rolling(window=20).mean().iloc[-1]) * 28
 
-            if liquidez_media_recente < LIMITE_LIQUIDEZ_DIARIA:
-                continue
-
+            if liquidez_diaria < LIMITE_LIQUIDEZ_DIARIA: continue
             preco_atual = float(fechamentos.iloc[-1])
-            if preco_atual < 1.00:
-                continue
 
-            # Indicadores Comuns e Volatilidade
             high_low = df['High'] - df['Low']
             df['ATR'] = high_low.rolling(window=14).mean()
             atr_atual = float(df['ATR'].iloc[-1])
+            
             df['Vol_Quantidade_Media'] = volumes.rolling(window=20).mean()
             vol_ratio = float(volumes.iloc[-1] / df['Vol_Quantidade_Media'].iloc[-1])
 
-            # =================================================================
-            # MOTOR 1: IDENTIFICAÇÃO DE EXAUSTÃO DE VENDA (PÂNICO)
-            # =================================================================
+            # Motor 1: Exaustão de Venda (Pânico)
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             ifr_atual = float(df['IFR'].iloc[-1])
 
             if ifr_atual <= 33.0:
-                if ifr_atual <= 30.0 and vol_ratio >= 1.5:
-                    categoria_peso = 1
-                elif ifr_atual < 30.0 and vol_ratio < 1.0:
-                    categoria_peso = 3
-                elif ifr_atual <= 33.0 and vol_ratio >= 1.2:
-                    categoria_peso = 2
-                else:
-                    categoria_peso = 4
-
+                dist_stop = atr_atual * 2 if atr_atual > 0 else preco_atual * 0.02
+                stop_loss = preco_atual - dist_stop
+                alvo_lucro = preco_atual + (dist_stop * 1.5)
+                
+                salvar_sinal_no_banco(ticker.replace('.SA',''), "Exaustão de Venda", preco_atual, stop_loss, alvo_lucro)
+                
                 pool_exaustao.append({
-                    'ticker': ticker.replace('.SA', ''), 'preco': preco_atual, 'ifr': ifr_atual,
-                    'vol_ratio': vol_ratio, 'atr': atr_atual, 'liquidez': liquidez_media_recente,
-                    'categoria': categoria_peso
+                    'Ativo': ticker.replace('.SA', ''), 'Preço (R$)': round(preco_atual, 2), 
+                    'IFR': round(ifr_atual, 2), 'Vol_Ratio': round(vol_ratio, 2), 'atr': atr_atual
                 })
 
-            # =================================================================
-            # MOTOR 2: DETECÇÃO DE RETOMADA CONFIRMADA (MOMENTUM / REVERSÃO)
-            # =================================================================
+            # Motor 2: Retomada de Subida (Tendência)
             df['EMA_9'] = fechamentos.ewm(span=9, adjust=False).mean()
             df['EMA_21'] = fechamentos.ewm(span=21, adjust=False).mean()
-            
-            ema9_atual = float(df['EMA_9'].iloc[-1])
-            ema21_atual = float(df['EMA_21'].iloc[-1])
-            ema9_anterior = float(df['EMA_9'].iloc[-2])
-            ema21_anterior = float(df['EMA_21'].iloc[-2])
-
             df['Donchian_High'] = df['High'].rolling(window=20).max()
-            donchian_high_atual = float(df['Donchian_High'].iloc[-1])
 
-            cruzamento_alta = (ema9_atual > ema21_atual) and (ema9_anterior <= ema21_anterior or fechamentos.iloc[-1] > df['High'].rolling(window=10).max().iloc[-2])
-            volume_confirmado = vol_ratio >= 1.2
-
-            if cruzamento_alta and volume_confirmado and (preco_atual >= donchian_high_atual * 0.98):
-                forca_momentum = (preco_atual - ema21_atual) / ema21_atual
+            if (df['EMA_9'].iloc[-1] > df['EMA_21'].iloc[-1]) and (vol_ratio >= 1.2) and (preco_atual >= df['Donchian_High'].iloc[-1] * 0.98):
+                momentum = (preco_atual - df['EMA_21'].iloc[-1]) / df['EMA_21'].iloc[-1]
+                
+                dist_stop = atr_atual * 1.5 if atr_atual > 0 else preco_atual * 0.015
+                stop_loss = preco_atual - dist_stop
+                alvo_lucro = preco_atual + (dist_stop * 2.0)
+                
+                salvar_sinal_no_banco(ticker.replace('.SA',''), "Retomada de Subida", preco_atual, stop_loss, alvo_lucro)
                 
                 pool_retomada.append({
-                    'ticker': ticker.replace('.SA', ''), 'preco': preco_atual, 'ifr': ifr_atual,
-                    'vol_ratio': vol_ratio, 'atr': atr_atual, 'liquidez': liquidez_media_recente,
-                    'momentum': forca_momentum
+                    'Ativo': ticker.replace('.SA', ''), 'Preço (R$)': round(preco_atual, 2), 
+                    'IFR': round(ifr_atual, 2), 'Vol_Ratio': round(vol_ratio, 2), 'atr': atr_atual, 'Momentum': momentum
                 })
-
-            time.sleep(0.04)
         except: continue
 
-    msg_final = ""
+    df_ex = pd.DataFrame(pool_exaustao) if pool_exaustao else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio', 'atr'])
+    df_ret = pd.DataFrame(pool_retomada) if pool_retomada else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio', 'atr', 'Momentum'])
+    
+    if not df_ex.empty: df_ex = df_ex.sort_values(by='IFR', ascending=True).head(5)
+    if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(5)
+    
+    return df_ex, df_ret
 
-    # =========================================================================
-    # PROCESSAMENTO DO RELATÓRIO 1: EXAUSTÃO DE VENDA
-    # =========================================================================
-    if pool_exaustao:
-        df_ex = pd.DataFrame(pool_exaustao)
-        df_top10_ex = df_ex.sort_values(by=['categoria', 'ifr'], ascending=[True, True]).head(10)
+# =====================================================================
+# INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
+# =====================================================================
+st.title("🤖 AGENTE FINANCEIRO IA: Painel Quantitativo Avançado")
+st.markdown("---")
 
-        msg_final += "*🔥 RANKING TOP 10 PRIORIDADE DE RETORNO B3 (EXAUSTÃO) 🔥*\n"
-        msg_final += "_Alvos de pânico com iminente repique institucional_\n\n"
-        
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        for idx, row in df_top10_ex.reset_index(drop=True).iterrows():
-            manchetes = buscar_noticias_reais_yfinance(f"{row['ticker']}.SA")
-            fato_relevante = gerar_fato_ocorrido_por_ia(row['ticker'], row['preco'], manchetes)
+# Abas principais da ferramenta
+tab_monitoramento, tab_historico = st.tabs(["📊 Gráficos & Sinais Online", "🗄️ Histórico SQLite"])
 
-            distancia_stop = row['atr'] * 2 if row['atr'] > 0 else row['preco'] * 0.02
-            stop_loss = row['preco'] - distancia_stop
-            alvo_lucro = row['preco'] + (distancia_stop * 1.5)
-            quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (row['preco'] - stop_loss)) if (row['preco'] - stop_loss) > 0 else 0
+with tab_monitoramento:
+    col_esquerda, col_direita = st.columns([1, 1.8])
 
-            if row['categoria'] == 1:
-                diagnostico = "💥 CLÍMAX DE VENDA (ALTA PRIORIDADE)\nPânico institucional com volume extremo. Alto potencial de repique."
-            elif row['categoria'] == 2:
-                diagnostico = "⚖️ SUPORTE RELEVANTE (MÉDIA PRIORIDADE)\nAtivo defendido por ordens institucionais na região."
-            elif row['categoria'] == 3:
-                diagnostico = "⚠️ RISCO DE ARRASTO (ALTA EXAUSTÃO / BAIXO FLUXO)\nPreço baixo por gravidade, sem agressão compradora."
+    with col_esquerda:
+        st.subheader("🔍 Ativos Selecionados")
+        st.caption("Clique na linha de qualquer tabela para carregar o gráfico instantaneamente.")
+
+        with st.spinner("Rodando scanner de mercado..."):
+            df_exaustao, df_retomada = processar_mercado_duplo()
+
+        # Ativo padrão de fallback caso nada seja selecionado
+        ativo_final = "EMBR3"
+
+        # 1. Tabela Interativa de Retomada com Captura de Clique Protegida
+        st.markdown("**🚀 Top 5 - Retomada Confirmada de Alta**")
+        if not df_retomada.empty:
+            sel_ret = st.dataframe(
+                df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                use_container_width=True, hide_index=True,
+                selection_mode="single-row", on_select="rerun"
+            )
+            # Extrator blindado: força a extração do valor puro do texto da célula selecionada
+            if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
+                idx_linha = sel_ret["selection"]["rows"][0]
+                ativo_bruto = df_retomada.iloc[idx_linha]['Ativo']
+                ativo_final = str(ativo_bruto).strip().split()[-1] if hasattr(ativo_bruto, 'dtype') else str(ativo_bruto).strip()
+        else:
+            st.info("Nenhuma ação em reversão de alta.")
+
+        # 2. Tabela Interativa de Exaustão com Captura de Clique Protegida
+        st.markdown("**💥 Top 5 - Clímax / Exaustão de Venda**")
+        if not df_exaustao.empty:
+            sel_ex = st.dataframe(
+                df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                use_container_width=True, hide_index=True,
+                selection_mode="single-row", on_select="rerun"
+            )
+            if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
+                idx_linha = sel_ex["selection"]["rows"][0]
+                ativo_bruto = df_exaustao.iloc[idx_linha]['Ativo']
+                ativo_final = str(ativo_bruto).strip().split()[-1] if hasattr(ativo_bruto, 'dtype') else str(ativo_bruto).strip()
+        else:
+            st.info("Nenhuma ação em pânico institucional.")
+
+    with col_direita:
+        st.subheader(f"📊 Análise Visual do Preço: {ativo_final}")
+
+        # Controles Avançados do Gráfico solicitados pelo usuário
+        c1, c2 = st.columns(2)
+        with c1:
+            periodo_opcao = st.selectbox("Período Histórico:", ["1 dia (Intraday)", "Últimas Horas", "5 dias", "1 mês"])
+        with c2:
+            candle_opcao = st.selectbox("Tempo do Candle (Tempo Gráfico):", ["15 minutos", "5 minutos", "30 minutos", "1 hora", "1 dia", "1 semana"], index=0)
+
+        # Mapeamento de Parâmetros do Yahoo Finance
+        map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
+        map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
+
+        periodo_yf = map_periodo[periodo_opcao]
+        candle_yf = map_candle[candle_opcao]
+
+        try:
+            ticker_yf = f"{ativo_final}.SA"
+            dados = yf.download(ticker_yf, period=periodo_yf, interval=candle_yf, progress=False, auto_adjust=True, multi_level_index=False)
+
+            if not dados.empty:
+                dados = dados.dropna(subset=['Close'])
+
+                # Filtro específico para a opção "Últimas Horas"
+                if periodo_opcao == "Últimas Horas" and len(dados) > 16:
+                    dados = dados.tail(16)
+
+                preco_atual = float(dados['Close'].iloc[-1])
+
+                # Parâmetros de risco dinâmicos via ATR
+                high_low = dados['High'] - dados['Low']
+                atr_calc = float(high_low.rolling(window=14).mean().fillna(preco_atual * 0.01).iloc[-1])
+                
+                stop_loss = preco_atual - (atr_calc * 2)
+                alvo_lucro = preco_atual + (atr_calc * 1.5)
+                quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
+
+                # Adiciona Média Móvel de Referência de 20 períodos
+                dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean().fillna(dados['Close'])
+
+                # Métricas Rápidas na Tela
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
+                m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
+                m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
+
+                # -----------------------------------------------------------------
+                # CONSTRUÇÃO DO GRÁFICO PROFISSIONAL (PLOTLY)
+                # -----------------------------------------------------------------
+                fig = go.Figure()
+
+                # Linha de Preço principal
+                fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Preço Fechamento', line=dict(color='#2ca02c', width=2.5)))
+                
+                # Linha da Média Móvel de Apoio
+                fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5, dash='solid')))
+
+                # Linhas Horizontais Estáticas de Alvo e Stop Loss
+                fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo Lucro", annotation_position="top right")
+                fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop Loss", annotation_position="bottom right")
+
+                # Supressão cirúrgica de horários inativos do pregão da B3
+                fig.update_xaxes(
+                    rangebreaks=[
+                        dict(bounds=["sat", "mon"]), # Oculta Finais de Semana
+                        dict(bounds=[18, 10], pattern="hour") # Oculta Noites/Madrugadas (Das 18h às 10h)
+                    ]
+                )
+
+                # Customização Estética do Layout para Modo Dark Elegante
+                fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    height=450,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para manter o risco fixado em R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
+
+                with st.spinner("Interpretando fatos de mercado..."):
+                    feed = buscar_noticias_reais_yfinance(ticker_yf)
+                    contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
+                st.info(f"📰 **Contexto IA:** {contexto_ia}")
+
             else:
-                diagnostico = "⏳ MONITORAMENTO TÉCNICO VENDEDOR\nApenas oscilação rotineira dentro da tendência de baixa."
+                st.error("Sem dados de cotação para as combinações gráficas selecionadas.")
+        except Exception as e:
+            st.error(f"Erro ao renderizar painel visual: {str(e)}")
 
-            msg_final += (
-                f"{emojis[idx]} *{row['ticker']}* | Giro Estimado: R$ {row['liquidez']/1000000:.1f}M/dia\n"
-                f"• Preço: R$ {row['preco']:.2f} | IFR: {row['ifr']:.2f} | Vol: {row['vol_ratio']:.2f}x\n"
-                f"📊 *Diagnóstico:* {diagnostico}\n"
-                f"🛡️ *Plano Ágora ({quantidade_lote} ações):* Stop R$ {stop_loss:.2f} | Alvo R$ {alvo_lucro:.2f}\n"
-                f"📰 *IA Contexto:* {fato_relevante}\n\n"
-            )
+# ---------------------------------------------------------------------
+# ABA 2: HISTÓRICO DE SINAIS (AUDITORIA SQLITE)
+# ---------------------------------------------------------------------
+with tab_historico:
+    st.subheader("🗄️ Histórico de Varreduras do Robô")
+    df_db = carregar_historico_banco()
+    if not df_db.empty:
+        df_db.columns = ['ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada', 'Stop Loss', 'Alvo', 'Status']
+        st.dataframe(df_db, use_container_width=True, hide_index=True)
     else:
-        msg_final += "ℹ️ Nenhuma oportunidade encontrada em Exaustão de Venda.\n\n"
-
-    msg_final += "───────────────────────────\n\n"
-
-    # =========================================================================
-    # PROCESSAMENTO DO RELATÓRIO 2: RETOMADA CONFIRMADA (SUBIDA)
-    # =========================================================================
-    if pool_retomada:
-        df_ret = pd.DataFrame(pool_retomada)
-        df_top10_ret = df_ret.sort_values(by=['momentum'], ascending=[False]).head(10)
-
-        msg_final += "*🚀 TOP 10 AÇÕES EM RETOMADA CONFIRMADA (COMPRA NA SUBIDA) 🚀*\n"
-        msg_final += "_Pivôs de reversão validados com fluxo e cruzamento de médias_\n\n"
-
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        for idx, row in df_top10_ret.reset_index(drop=True).iterrows():
-            manchetes = buscar_noticias_reais_yfinance(f"{row['ticker']}.SA")
-            fato_relevante = gerar_fato_ocorrido_por_ia(row['ticker'], row['preco'], manchetes)
-
-            distancia_stop = row['atr'] * 1.5 if row['atr'] > 0 else row['preco'] * 0.015
-            stop_loss = row['preco'] - distancia_stop
-            alvo_lucro = row['preco'] + (distancia_stop * 2.0)
-            quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (row['preco'] - stop_loss)) if (row['preco'] - stop_loss) > 0 else 0
-
-            msg_final += (
-                f"{emojis[idx]} *{row['ticker']}* | Força Momentum: +{row['momentum']*100:.1f}%\n"
-                f"• Preço: R$ {row['preco']:.2f} | IFR: {row['ifr']:.2f} | Vol: {row['vol_ratio']:.2f}x\n"
-                f"🛡️ *Plano Ágora ({quantidade_lote} ações):* Stop R$ {stop_loss:.2f} | Alvo R$ {alvo_lucro:.2f}\n"
-                f"📰 *IA Contexto:* {fato_relevante}\n\n"
-            )
-    else:
-        msg_final += "ℹ️ Nenhuma ação confirmou reversão de alta neste ciclo de mercado.\n\n"
-
-    if pool_exaustao or pool_retomada:
-        print("\n================ RELATÓRIO GLOBAL EXECUTADO ================\n", msg_final)
-        enviar_telegram(msg_final); enviar_email(msg_final); enviar_sms(msg_final)
-    else:
-        print("Nenhuma ação passou pelos filtros mínimos do scanner.")
-
-if __name__ == "__main__":
-    executar_agente_b3_analista()
+        st.info("Nenhum registro gravado nas tabelas locais até o momento.")
