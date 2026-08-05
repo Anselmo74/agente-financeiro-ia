@@ -41,7 +41,7 @@ URL_IA_PROXIMIDADE = "https://openrouter.ai"
 
 # Parâmetros de Gestão de Risco Blindada
 RISCO_MAXIMO_FINANCEIRO = 1000.00
-LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro mínimo de R$ 1 Milhão/dia
+LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro mínimo dinâmico de R$ 1 Milhão/dia solicitado
 DB_NAME = "trades_historico.db"
 
 # =====================================================================
@@ -131,14 +131,27 @@ def enviar_alerta_telegram(ticker, estrategia, preco, stop, alvo):
         print(f"Erro ao enviar mensagem para o Telegram: {e}")
 
 # =====================================================================
-# UNIVERSO DE ATIVOS DA B3 E DATA WORKER
+# UNIVERSO EXPANDIDO DE ATIVOS DA B3 (IBOVESPA, MID CAPS E SMALL CAPS)
 # =====================================================================
 def obter_universo_b3():
-    """Lista higienizada de ativos focos de alta liquidez."""
+    """Gera uma lista ampla de monitoramento contendo Small Caps e IBOV."""
     tickers_base = [
-        "CMIN3", "UGPA3", "EMBR3", "VALE3", "PETR4", "ITUB4", "BBDC4", "BBAS3", 
-        "WEGE3", "RENT3", "PRIO3", "SBSP3", "SUZB3", "JBSS3", "LREN3", "RAIL3",
-        "ABEV3", "B3SA3", "BBSE3", "RADL3", "HAPV3", "GGBR4", "CSNA3", "MGLU3"
+        "RRRP3", "ALOS3", "ALPA4", "ABEV3", "ARZZ3", "ASAI3", "AZUL4", "B3SA3", "BBSE3", "BBDC3",
+        "BBDC4", "BRAP4", "BBAS3", "BRKM5", "BRFS3", "BPAC11", "CRFB3", "CCRO3", "CMIG4",
+        "COGN3", "CPLE6", "CSAN3", "CPFE3", "CMIN3", "CVCB3", "CYRE3", "DXCO3", "ELET3", "ELET6",
+        "EMBR3", "ENGI11", "ENEV3", "EGIE3", "EQTL3", "EZTC3", "FLRY3", "GGBR4", "GOAU4",
+        "NTCO3", "HAPV3", "HYBR3", "IGTI11", "IRBR3", "ITSA4", "ITUB4", "JBSS3", "JHSF3",
+        "KLBN11", "RENT3", "LREN3", "MDIA3", "MGLU3", "MRVE3", "MULT3", "PCAR3", "PETR3", "PETR4",
+        "RECV3", "PRIO3", "PETZ3", "RADL3", "RAIZ4", "RDOR3", "RAIL3", "SBSP3", "SANB11", "SMTO3",
+        "STBP3", "SUZB3", "TAEE11", "VIVT3", "TIMS3", "TOTS3", "TRPL4", "UGPA3", "USIM5",
+        "VALE3", "VAMO3", "VBBR3", "WEGE3", "YDUQ3", "AERI3", "AURE3", "AMER3", "ARML3",
+        "BLAU3", "CAML3", "CASH3", "CEAB3", "CLSA3", "CSNA3", "CURY3", "DIRR3", "EVEN3", 
+        "FESA4", "FIQE3", "GGRC11", "GMAT3", "GRND3", "GUAR3", "IFCM3", "INTB3", "JALL3",
+        "KEPL3", "LAND3", "LAVV3", "LOGG3", "LOGN3", "AMBP3", "LWSA3", "MATD3", "MEAL3",
+        "MELK3", "MOVI3", "MYPK3", "NEOE3", "ODPV3", "ONCO3", "ORVR3", "PGMN3", "PLPL3",
+        "PNVL3", "POMO4", "POSI3", "PRNR3", "QUAL3", "RAPT4", "RCSL4", "ROMI3", "SEQL3", 
+        "SIMH3", "SLCE3", "TASA4", "TECN3", "TEND3", "TGMA3", "TRIS3", "TTEN3", "TUPY3", 
+        "UNIP6", "VIVA3", "VLID3", "ZAMP3"
     ]
     return sorted(list(set([f"{t}.SA" for t in tickers_base])))
 
@@ -168,7 +181,6 @@ def atualizar_trades_abertos():
     for trade in trades_abertos:
         db_id, ticker, preco_entrada, stop_loss, alvo = trade
         try:
-            # Baixa o último preço de fechamento intradiário
             df = yf.download(f"{ticker}.SA", period="1d", interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
             if df.empty: continue
             
@@ -180,7 +192,6 @@ def atualizar_trades_abertos():
             preco_saida = None
             lucro_prejuizo = None
 
-            # Avalia se a mínima do dia violou o stop ou se a máxima atingiu o alvo
             if minima_dia <= stop_loss:
                 status_novo = "Stop Loss"
                 preco_saida = stop_loss
@@ -203,18 +214,17 @@ def atualizar_trades_abertos():
     conn.close()
 
 # =====================================================================
-# CORE QUANTITATIVO: SCANNER DE MERCADO CACHEADO
+# CORE QUANTITATIVO: SCANNER COM FILTRO DE LIQUIDEZ E RANKING TOP 10
 # =====================================================================
 @st.cache_data(ttl=120)
 def calcular_dados_mercado():
-    """Varre a B3, calcula indicadores quantitativos e retorna os rankings (Puro)."""
+    """Varre a lista ampla da B3, filtra liquidez real > R$ 1M/dia e ranqueia o Top 10."""
     lista_ativos = obter_universo_b3()
     pool_exaustao = []
     pool_retomada = []
 
     for ticker in lista_ativos:
         try:
-            # Janela de 1 mês para estabilização correta de médias e ATR intradiário
             df = yf.download(ticker, period="1mo", interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
             if df.empty or len(df) < 50: continue
             
@@ -222,14 +232,14 @@ def calcular_dados_mercado():
             fechamentos = df['Close'].squeeze()
             volumes = df['Volume'].squeeze()
 
-            # Métrica robusta de liquidez intradiária projetada
+            # Cálculo de liquidez: média do volume financeiro intradiário projetado para o dia inteiro
             df['Vol_Financeiro'] = fechamentos * volumes
             liquidez_diaria = float(df['Vol_Financeiro'].rolling(window=100).mean().iloc[-1]) * 28
 
+            # FILTRO DINÂMICO: Garante a inclusão de Small Caps com liquidez acima de R$ 1 Milhão/dia
             if liquidez_diaria < LIMITE_LIQUIDEZ_DIARIA: continue
             preco_atual = float(fechamentos.iloc[-1])
 
-            # Indicadores técnicos estruturados
             df['ATR'] = (df['High'] - df['Low']).rolling(window=14).mean()
             df['Vol_Quantidade_Media'] = volumes.rolling(window=20).mean()
             
@@ -238,7 +248,7 @@ def calcular_dados_mercado():
             atr_atual = float(df['ATR'].iloc[-1])
             vol_ratio = float(volumes.iloc[-1] / df['Vol_Quantidade_Media'].iloc[-1])
 
-            # Motor 1: Exaustão de Venda (Pânico Operacional)
+            # Motor 1: Saturação / Exaustão de Venda (Pânico Operacional)
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             if df['IFR'].isna().iloc[-1]: continue
             ifr_atual = float(df['IFR'].iloc[-1])
@@ -271,18 +281,19 @@ def calcular_dados_mercado():
     df_ex = pd.DataFrame(pool_exaustao) if pool_exaustao else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio', 'atr', 'stop_loss', 'alvo_lucro'])
     df_ret = pd.DataFrame(pool_retomada) if pool_retomada else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio', 'atr', 'Momentum', 'stop_loss', 'alvo_lucro'])
     
-    if not df_ex.empty: df_ex = df_ex.sort_values(by='IFR', ascending=True).head(5)
-    if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(5)
+    # RANKING EXPANDIDO: Filtra e entrega o Top 10 para ambas as estratégias
+    if not df_ex.empty: df_ex = df_ex.sort_values(by='IFR', ascending=True).head(10)
+    if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(10)
     
     return df_ex, df_ret
 
 def executar_pipeline_sinais():
     """Pipeline de execução que calcula dados e grava em banco fora do cache de tela."""
-    atualizar_trades_abertos()  # Executa rotina de manutenção antes de gerar novos sinais
+    atualizar_trades_abertos()
     df_ex, df_ret = calcular_dados_mercado()
     
     for _, row in df_ex.iterrows():
-        salvar_sinal_no_banco(row['Ativo'], "Exaustão de Venda", row['Preço (R$)'], row['stop_loss'], row['alvo_lucro'])
+        salvar_sinal_no_banco(row['Ativo'], "Saturação de Venda", row['Preço (R$)'], row['stop_loss'], row['alvo_lucro'])
     for _, row in df_ret.iterrows():
         salvar_sinal_no_banco(row['Ativo'], "Retomada de Subida", row['Preço (R$)'], row['stop_loss'], row['alvo_lucro'])
         
@@ -349,8 +360,8 @@ if RODANDO_NO_STREAMLIT:
             with st.spinner("Rodando scanner de mercado e atualizando posições..."):
                 df_exaustao, df_retomada = executar_pipeline_sinais()
 
-            # 1. Tabela de Retomada Blindada
-            st.markdown("**🚀 Top 5 - Retomada Confirmada de Alta**")
+            # 1. Tabela de Retomada Expandida para Top 10
+            st.markdown("**🚀 Top 10 - Retomada Confirmada de Alta**")
             if not df_retomada.empty:
                 sel_ret = st.dataframe(
                     df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
@@ -359,13 +370,13 @@ if RODANDO_NO_STREAMLIT:
                     key="tabela_retomada"
                 )
                 if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                    idx = sel_ret["selection"]["rows"][0]
+                    idx = sel_ret["selection"]["rows"]
                     st.session_state["ativo_selecionado"] = str(df_retomada.iloc[idx]['Ativo']).strip()
             else:
                 st.info("Nenhuma ação em reversão de alta.")
 
-            # 2. Tabela de Exaustão Blindada
-            st.markdown("**💥 Top 5 - Clímax / Exaustão de Venda**")
+            # 2. Tabela de Exaustão Expandida para Top 10 com Linguagem Higienizada
+            st.markdown("**💥 Top 10 - Saturação / Exaustão de Venda**")
             if not df_exaustao.empty:
                 sel_ex = st.dataframe(
                     df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
@@ -374,7 +385,7 @@ if RODANDO_NO_STREAMLIT:
                     key="tabela_exaustao"
                 )
                 if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                    idx = sel_ex["selection"]["rows"][0]
+                    idx = sel_ex["selection"]["rows"]
                     st.session_state["ativo_selecionado"] = str(df_exaustao.iloc[idx]['Ativo']).strip()
             else:
                 st.info("Nenhuma ação em pânico institucional.")
