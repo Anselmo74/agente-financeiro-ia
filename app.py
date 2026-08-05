@@ -178,7 +178,7 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             if vol_ratio >= 1.0:
                 desvio_vol_str = f"🚀 Acima ({vol_ratio * 100:.1f}%)"
             else:
-                desvio_vol_str = f"降低 Abaixo ({vol_ratio * 100:.1f}%)"
+                desvio_vol_str = f"📉 Abaixo ({vol_ratio * 100:.1f}%)"
 
             # -----------------------------------------------------------------
             # Motor 1: Pânico de Venda
@@ -233,7 +233,6 @@ def processar_mercado_duplo(lista_ativos_custom=None):
         if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(10)
     
     return df_ex, df_ret
-
 
 # =====================================================================
 # INTERFACE VISUAL PRINCIPAL (STREAMLIT APP UI)
@@ -339,11 +338,11 @@ with tab_monitoramento:
             if not dados.empty:
                 dados = dados.dropna(subset=['Close', 'Volume'])
 
-                # Camada Inteligente de Filtragem de Horários Estáticos baseada no calendário da B3
+                # Camada de filtragem de data para isolar dias úteis
                 dados['Data_Apenas'] = dados.index.date
                 datas_unicas = sorted(list(set(dados['Data_Apenas'])))
 
-                # Filtro estratégico solicitado para isolar o intraday do último pregão com 15m
+                # Força o isolamento completo do último dia útil negociado na B3
                 if periodo_opcao == "1 dia (Último Pregão)" and len(datas_unicas) >= 1:
                     ultima_data_negociada = datas_unicas[-1]
                     dados = dados[dados['Data_Apenas'] == ultima_data_negociada]
@@ -365,31 +364,27 @@ with tab_monitoramento:
                 dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean().fillna(dados['Close'])
                 volume_medio_recente = dados['Volume'].rolling(window=20).mean().fillna(dados['Volume'])
 
-                # Cartões de Métricas com Medidor de Volatilidade Estática (ATR)
+                # Cartões de Métricas
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Preço Analisado", f"R$ {preco_atual:.2f}")
                 m2.metric("Stop Loss", f"R$ {stop_loss:.2f}")
                 m3.metric("Alvo Projetado", f"R$ {alvo_lucro:.2f}")
                 m4.metric("Volatilidade (ATR)", f"R$ {atr_calc:.2f}")
 
-                # -----------------------------------------------------------------
-                # CONSTRUÇÃO DO GRÁFICO DUPLO PROFISSIONAL (PLOTLY)
-                # -----------------------------------------------------------------
+                # Construção do gráfico duplo com subplot de volume proporcional
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_width=[0.3, 0.7])
 
-                # Painel 1: Preço de Linha e Média Móvel
                 fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Close'], name='Preço', line=dict(color='#2ca02c', width=2.5)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Média Ref (20)'], name='Média 20', line=dict(color='#ff7f0e', width=1.5)), row=1, col=1)
 
-                # Painel 2: Barras de Volume Proporcional com Realce de Fluxo Acima da Média
+                # Coloração inteligente do volume em barras
                 coloracao_volume = ['#d62728' if v > m * 1.2 else '#1f77b4' for v, m in zip(dados['Volume'], volume_medio_recente)]
                 fig.add_trace(go.Bar(x=dados.index.astype(str), y=dados['Volume'], name='Volume do Candle', marker=dict(color=coloracao_volume)), row=2, col=1)
 
-                # Linhas de Alvo e Stop Loss
                 fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo", annotation_position="top right", row=1, col=1)
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop", annotation_position="bottom right", row=1, col=1)
 
-                # Mantém o eixo contínuo e limpo por categorias, eliminando linhas mortas de finais de semana
+                # Mantém o eixo X linearizado por categoria para não gerar lacunas de madrugadas
                 fig.update_xaxes(type='category')
                 fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=520, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 
@@ -403,3 +398,11 @@ with tab_monitoramento:
             else:
                 st.error("Não foram encontrados dados históricos para renderizar este ativo fora do pregão.")
         except Exception as e:
+            st.error(f"Erro ao carregar painel visual: {str(e)}")
+
+# Aba de Histórico SQLite e Auditoria de Cliques
+with tab_historico:
+    st.subheader("🗄️ Histórico de Consultas e Oportunidades Identificadas")
+    st.caption("Todos os sinais identificados pelo scanner no momento em que a página foi carregada ficam registrados abaixo.")
+    df_db = carregar_historico_banco()
+    if not df_db.empty:
