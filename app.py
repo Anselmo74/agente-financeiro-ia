@@ -8,10 +8,7 @@ import warnings
 import logging
 import sqlite3
 import os
-import smtplib
 import plotly.graph_objects as go
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # Silenciar avisos e logs secundários do terminal para performance limpa
@@ -19,18 +16,22 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# Configuração de Layout da Página Web (Obrigatório ser o primeiro comando do script)
-if not st.errors.FileDialogTriggerInsideSubmitError: # Garante compatibilidade se rodar fora do Streamlit
+# =====================================================================
+# INICIALIZAÇÃO BLINDADA DO LAYOUT DA PÁGINA (RESOLUÇÃO DE BUG)
+# =====================================================================
+try:
     st.set_page_config(
         page_title="Agente IA Financeiro B3",
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    RODANDO_NO_STREAMLIT = True
+except Exception:
+    RODANDO_NO_STREAMLIT = False
 
 # =====================================================================
 # CONFIGURAÇÕES GLOBAIS E CREDENCIAIS (Variáveis de Ambiente / Secrets)
 # =====================================================================
-# Tentativa de carregar via st.secrets (Streamlit Cloud), senão usa variáveis locais ou fallback seguro
 TOKEN_TELEGRAM = st.secrets.get("TOKEN_TELEGRAM", "8852525281:AAH56WNVEmmXyxvol9RKmkB3aa1Toap1QoY")
 CHAT_ID_TELEGRAM = st.secrets.get("CHAT_ID_TELEGRAM", "8852525281")
 API_KEY_IA = st.secrets.get("API_KEY_IA", "fd10bd41-3d8f-50da-8a73-716eef2ec764")
@@ -44,7 +45,7 @@ LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro mínimo de R$ 1 Milhão/dia
 DB_NAME = "trades_historico.db"
 
 # =====================================================================
-# INFRAESTRUTURA DE BANCO DE DADOS (SQLITE BLINDADO)
+# INFRAESTRUTURA DE BANCO DE DADOS (SQLITE ASSÍNCRONO PROTEGIDO)
 # =====================================================================
 def inicializar_banco():
     """Cria a tabela de histórico e performance se não existir com tratamento de concorrência."""
@@ -100,11 +101,11 @@ def carregar_historico_banco():
     conn.close()
     return df
 
-# Inicializa o banco de dados na inicialização do script
+# Inicializa o banco de dados local
 inicializar_banco()
 
 # =====================================================================
-# MOTOR DE COMUNICAÇÃO EXTERNA (TELEGRAM DISPATCHER WRAPPER)
+# MOTOR DE COMUNICAÇÃO EXTERNA (TELEGRAM DISPATCHER)
 # =====================================================================
 def enviar_alerta_telegram(ticker, estrategia, preco, stop, alvo):
     """Envia notificações em tempo real das operações detectadas pelo robô."""
@@ -122,7 +123,7 @@ def enviar_alerta_telegram(ticker, estrategia, preco, stop, alvo):
     )
     
     url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
-    payload = {"chat_id": CHAT_ID_TELEGRAM, "text": mensaje, "parse_mode": "Markdown"}
+    payload = {"chat_id": CHAT_ID_TELEGRAM, "text": mensagem, "parse_mode": "Markdown"}
     
     try:
         requests.post(url, json=payload, timeout=5)
@@ -326,193 +327,189 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
 # =====================================================================
 # INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
 # =====================================================================
-st.title("🤖 AGENTE FINANCEIRO IA: Painel Quantitativo Avançado")
-st.markdown("---")
+# Garante a renderização do bloco de interface apenas se estiver no Streamlit
+if RODANDO_NO_STREAMLIT:
+    st.title("🤖 AGENTE FINANCEIRO IA: Painel Quantitativo Avançado")
+    st.markdown("---")
 
-# Inicialização segura do estado da sessão para evitar perda do ativo selecionado
-if "ativo_selecionado" not in st.session_state:
-    st.session_state["ativo_selecionado"] = "EMBR3"
+    # Inicialização segura do estado da sessão para evitar perda do ativo selecionado
+    if "ativo_selecionado" not in st.session_state:
+        st.session_state["ativo_selecionado"] = "EMBR3"
 
-# Abas principais da ferramenta (Monitoramento e Histórico com Auditoria)
-tab_monitoramento, tab_historico = st.tabs(["📊 Gráficos & Sinais Online", "🗄️ Histórico & Performance"])
+    # Abas principais da ferramenta (Monitoramento e Histórico com Auditoria)
+    tab_monitoramento, tab_historico = st.tabs(["📊 Gráficos & Sinais Online", "🗄️ Histórico & Performance"])
 
-with tab_monitoramento:
-    col_esquerda, col_direita = st.columns([1, 1.8])
+    with tab_monitoramento:
+        col_esquerda, col_direita = st.columns([1, 1.8])
 
-    with col_esquerda:
-        st.subheader("🔍 Ativos Selecionados")
-        st.caption("Selecione uma linha para carregar o gráfico instantaneamente.")
+        with col_esquerda:
+            st.subheader("🔍 Ativos Selecionados")
+            st.caption("Selecione uma linha para carregar o gráfico instantaneamente.")
 
-        with st.spinner("Rodando scanner de mercado e atualizando posições..."):
-            df_exaustao, df_retomada = executar_pipeline_sinais()
+            with st.spinner("Rodando scanner de mercado e atualizando posições..."):
+                df_exaustao, df_retomada = executar_pipeline_sinais()
 
-        # 1. Tabela de Retomada Blindada
-        st.markdown("**🚀 Top 5 - Retomada Confirmada de Alta**")
-        if not df_retomada.empty:
-            sel_ret = st.dataframe(
-                df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
-                use_container_width=True, hide_index=True,
-                selection_mode="single-row", on_select="rerun",
-                key="tabela_retomada"
-            )
-            if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                idx = sel_ret["selection"]["rows"][0]
-                st.session_state["ativo_selecionado"] = str(df_retomada.iloc[idx]['Ativo']).strip()
-        else:
-            st.info("Nenhuma ação em reversão de alta.")
+            # 1. Tabela de Retomada Blindada
+            st.markdown("**🚀 Top 5 - Retomada Confirmada de Alta**")
+            if not df_retomada.empty:
+                sel_ret = st.dataframe(
+                    df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                    use_container_width=True, hide_index=True,
+                    selection_mode="single-row", on_select="rerun",
+                    key="tabela_retomada"
+                )
+                if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
+                    idx = sel_ret["selection"]["rows"][0]
+                    st.session_state["ativo_selecionado"] = str(df_retomada.iloc[idx]['Ativo']).strip()
+            else:
+                st.info("Nenhuma ação em reversão de alta.")
 
-        # 2. Tabela de Exaustão Blindada
-        st.markdown("**💥 Top 5 - Clímax / Exaustão de Venda**")
-        if not df_exaustao.empty:
-            sel_ex = st.dataframe(
-                df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
-                use_container_width=True, hide_index=True,
-                selection_mode="single-row", on_select="rerun",
-                key="tabela_exaustao"
-            )
-            if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                idx = sel_ex["selection"]["rows"][0]
-                st.session_state["ativo_selecionado"] = str(df_exaustao.iloc[idx]['Ativo']).strip()
-        else:
-            st.info("Nenhuma ação em pânico institucional.")
+            # 2. Tabela de Exaustão Blindada
+            st.markdown("**💥 Top 5 - Clímax / Exaustão de Venda**")
+            if not df_exaustao.empty:
+                sel_ex = st.dataframe(
+                    df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                    use_container_width=True, hide_index=True,
+                    selection_mode="single-row", on_select="rerun",
+                    key="tabela_exaustao"
+                )
+                if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
+                    idx = sel_ex["selection"]["rows"][0]
+                    st.session_state["ativo_selecionado"] = str(df_exaustao.iloc[idx]['Ativo']).strip()
+            else:
+                st.info("Nenhuma ação em pânico institucional.")
 
-    # Resgata o ativo estável do session_state
-    ativo_final = st.session_state["ativo_selecionado"]
+        # Resgata o ativo estável do session_state
+        ativo_final = st.session_state["ativo_selecionado"]
 
-    with col_direita:
-        st.subheader(f"📊 Análise Visual do Preço: {ativo_final}")
+        with col_direita:
+            st.subheader(f"📊 Análise Visual do Preço: {ativo_final}")
 
-        # Controles do Gráfico
-        c1, c2 = st.columns(2)
-        with c1:
-            periodo_opcao = st.selectbox("Período Histórico:", ["1 mês", "5 dias", "1 dia (Intraday)", "Últimas Horas"])
-        with c2:
-            candle_opcao = st.selectbox("Tempo do Candle (Tempo Gráfico):", ["15 minutos", "5 minutos", "30 minutos", "1 hora", "1 dia", "1 semana"], index=0)
+            # Controles do Gráfico
+            c1, c2 = st.columns(2)
+            with c1:
+                periodo_opcao = st.selectbox("Período Histórico:", ["1 mês", "5 dias", "1 dia (Intraday)", "Últimas Horas"])
+            with c2:
+                candle_opcao = st.selectbox("Tempo do Candle (Tempo Gráfico):", ["15 minutos", "5 minutos", "30 minutos", "1 hora", "1 dia", "1 semana"], index=0)
 
-        map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
-        map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
+            map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
+            map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
 
-        # Ajusta período para evitar erros de histórico curto no yfinance
-        periodo_yf = "3mo" if map_candle[candle_opcao] in ["1d", "1wk"] else map_periodo[periodo_opcao]
-        candle_yf = map_candle[candle_opcao]
+            # Ajusta período para evitar erros de histórico curto no yfinance
+            periodo_yf = "3mo" if map_candle[candle_opcao] in ["1d", "1wk"] else map_periodo[periodo_opcao]
+            candle_yf = map_candle[candle_opcao]
 
-        try:
-            ticker_yf = f"{ativo_final}.SA"
-            dados = yf.download(ticker_yf, period=periodo_yf, interval=candle_yf, progress=False, auto_adjust=True, multi_level_index=False)
+            try:
+                ticker_yf = f"{ativo_final}.SA"
+                dados = yf.download(ticker_yf, period=periodo_yf, interval=candle_yf, progress=False, auto_adjust=True, multi_level_index=False)
 
-            if not dados.empty:
-                dados = dados.dropna(subset=['Close', 'High', 'Low']).copy()
+                if not dados.empty:
+                    dados = dados.dropna(subset=['Close', 'High', 'Low']).copy()
 
-                # CÁLCULO MESTRE DE RISCO (Antes de fatiar os dados visuais)
-                preco_atual = float(dados['Close'].iloc[-1])
-                high_low = dados['High'] - dados['Low']
-                dados['ATR'] = high_low.rolling(window=14).mean()
-                
-                atr_calc = float(dados['ATR'].fillna(preco_atual * 0.015).iloc[-1])
-                stop_loss = preco_atual - (atr_calc * 2)
-                alvo_lucro = preco_atual + (atr_calc * 1.5)
-                quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
+                    # CÁLCULO MESTRE DE RISCO (Antes de fatiar os dados visuais)
+                    preco_atual = float(dados['Close'].iloc[-1])
+                    high_low = dados['High'] - dados['Low']
+                    dados['ATR'] = high_low.rolling(window=14).mean()
+                    
+                    atr_calc = float(dados['ATR'].fillna(preco_atual * 0.015).iloc[-1])
+                    stop_loss = preco_atual - (atr_calc * 2)
+                    alvo_lucro = preco_atual + (atr_calc * 1.5)
+                    quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
 
-                dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean()
+                    dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean()
 
-                # Filtro exclusivo de exibição em tela para a opção "Últimas Horas"
-                if periodo_opcao == "Últimas Horas" and len(dados) > 16:
-                    dados = dados.tail(16)
+                    # Filtro exclusivo de exibição em tela para a opção "Últimas Horas"
+                    if periodo_opcao == "Últimas Horas" and len(dados) > 16:
+                        dados = dados.tail(16)
 
-                # Métricas Rápidas na Tela
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
-                m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
-                m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
+                    # Métricas Rápidas na Tela
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
+                    m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
+                    m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
 
-                # Construção do Gráfico Plotly Modo Dark
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Fechamento', line=dict(color='#2ca02c', width=2.5)))
-                
-                if not dados['Média Ref (20)'].isna().all():
-                    fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5)))
+                    # Construção do Gráfico Plotly Modo Dark
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Fechamento', line=dict(color='#2ca02c', width=2.5)))
+                    
+                    if not dados['Média Ref (20)'].isna().all():
+                        fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5)))
 
-                fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo")
-                fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop")
+                    fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo")
+                    fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop")
 
-                # PROTEÇÃO TEMPORAL CRÍTICA: Aplica rangebreaks APENAS em dados intradiários
-                if candle_yf not in ["1d", "1wk"]:
-                    fig.update_xaxes(
-                        rangebreaks=[
-                            dict(bounds=["sat", "mon"]),
-                            dict(bounds=[18, 10], pattern="hour")
-                        ]
+                    # PROTEÇÃO TEMPORAL CRÍTICA: Aplica rangebreaks APENAS em dados intradiários
+                    if candle_yf not in ["1d", "1wk"]:
+                        fig.update_xaxes(
+                            rangebreaks=[
+                                dict(bounds=["sat", "mon"]),
+                                dict(bounds=[18, 10], pattern="hour")
+                            ]
+                        )
+
+                    fig.update_layout(
+                        template="plotly_dark",
+                        margin=dict(l=20, r=20, t=25, b=20),
+                        height=450,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
 
-                fig.update_layout(
-                    template="plotly_dark",
-                    margin=dict(l=20, r=20, t=25, b=20),
-                    height=450,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para risco de R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
 
-                st.plotly_chart(fig, use_container_width=True)
-                st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para risco de R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
+                    with st.spinner("Interpretando fatos de mercado..."):
+                        feed = buscar_noticias_reais_yfinance(ticker_yf)
+                        contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
+                    st.info(f"📰 **Contexto IA:** {contexto_ia}")
 
-                with st.spinner("Interpretando fatos de mercado..."):
-                    feed = buscar_noticias_reais_yfinance(ticker_yf)
-                    contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
-                st.info(f"📰 **Contexto IA:** {contexto_ia}")
+                else:
+                    st.error("Sem dados de cotação disponíveis para este ativo no momento.")
+            except Exception as e:
+                st.error(f"Erro ao renderizar painel visual: {str(e)}")
 
+    # =====================================================================
+    # ABA 2: HISTÓRICO DE SINAIS E MÓDULO DE PERFORMANCE (PAYOFF / WIN RATE)
+    # =====================================================================
+    with tab_historico:
+        st.subheader("📊 Métricas de Performance do Sistema")
+        
+        df_db = carregar_historico_banco()
+        
+        if not df_db.empty:
+            # Filtragem de trades encerrados para cálculo estatístico
+            df_encerrados = df_db[df_db['resultado'].isin(['Alvo Atingido', 'Stop Loss'])].copy()
+            
+            perf_c1, perf_c2, perf_c3, perf_c4 = st.columns(4)
+            
+            if not df_encerrados.empty:
+                total_encerrados = len(df_encerrados)
+                vitorias = len(df_encerrados[df_encerrados['resultado'] == 'Alvo Atingido'])
+                
+                # 1. Taxa de Acerto (Win Rate)
+                win_rate = (vitorias / total_encerrados) * 100
+                
+                # 2. Cálculo do Payoff Estatístico (Lucro Médio / Prejuízo Médio)
+                lucro_medio = df_encerrados[df_encerrados['resultado'] == 'Alvo Atingido']['lucro_prejuizo'].mean()
+                prejuizo_medio = abs(df_encerrados[df_encerrados['resultado'] == 'Stop Loss']['lucro_prejuizo'].mean())
+                
+                payoff = (lucro_medio / prejuizo_medio) if (prejuizo_medio > 0 and not np.isnan(prejuizo_medio)) else lucro_medio
+                if np.isnan(payoff): payoff = 0.0
+                
+                # 3. Lucro/Prejuízo Acumulado por Ação
+                pnl_total = df_encerrados['lucro_prejuizo'].sum()
+                
+                # Renderização dos Cards de Indicadores de Performance
+                perf_c1.metric("Trades Encerrados", f"{total_encerrados}")
+                perf_c2.metric("Taxa de Acerto (Win Rate)", f"{win_rate:.1f}%")
+                perf_c3.metric("Payoff Estatístico", f"{payoff:.2f}x")
+                perf_c4.metric("PnL Acumulado (Pontos)", f"R$ {pnl_total:.2f}", delta=f"{pnl_total:.2f}")
             else:
-                st.error("Sem dados de cotação disponíveis para este ativo no momento.")
-        except Exception as e:
-            st.error(f"Erro ao renderizar painel visual: {str(e)}")
+                st.info("Aguardando o encerramento do primeiro trade pelo simulador de background para calcular estatísticas matemáticas.")
 
-# =====================================================================
-# ABA 2: HISTÓRICO DE SINAIS E MÓDULO DE PERFORMANCE (PAYOFF / WIN RATE)
-# =====================================================================
-with tab_historico:
-    st.subheader("📊 Métricas de Performance do Sistema")
-    
-    df_db = carregar_historico_banco()
-    
-    if not df_db.empty:
-        # Filtragem de trades encerrados para cálculo estatístico
-        df_encerrados = df_db[df_db['resultado'].isin(['Alvo Atingido', 'Stop Loss'])].copy()
-        
-        perf_c1, perf_c2, perf_c3, perf_c4 = st.columns(4)
-        
-        if not df_encerrados.empty:
-            total_encerrados = len(df_encerrados)
-            vitorias = len(df_encerrados[df_encerrados['resultado'] == 'Alvo Atingido'])
-            
-            # 1. Taxa de Acerto (Win Rate)
-            win_rate = (vitorias / total_encerrados) * 100
-            
-            # 2. Cálculo do Payoff Estatístico (Lucro Médio / Prejuízo Médio)
-            lucro_medio = df_encerrados[df_encerrados['resultado'] == 'Alvo Atingido']['lucro_prejuizo'].mean()
-            prejuizo_medio = abs(df_encerrados[df_encerrados['resultado'] == 'Stop Loss']['lucro_prejuizo'].mean())
-            
-            payoff = (lucro_medio / prejuizo_medio) if (prejuizo_medio > 0 and not np.isnan(prejuizo_medio)) else lucro_medio
-            if np.isnan(payoff): payoff = 0.0
-            
-            # 3. Lucro/Prejuízo Acumulado por Ação
-            pnl_total = df_encerrados['lucro_prejuizo'].sum()
-            
-            # Renderização dos Cards de Indicadores de Performance
-            perf_c1.metric("Trades Encerrados", f"{total_encerrados}")
-            perf_c2.metric("Taxa de Acerto (Win Rate)", f"{win_rate:.1f}%")
-            perf_c3.metric("Payoff Estatístico", f"{payoff:.2f}x")
-            perf_c4.metric("PnL Acumulado (Pontos)", f"R$ {pnl_total:.2f}", delta=f"{pnl_total:.2f}")
-        else:
-            st.info("Aguardando o encerramento do primeiro trade pelo simulador de background para calcular estatísticas matematicas.")
+            st.markdown("---")
 
-        st.markdown("---")
-        st.subheader("🗄️ Histórico Completo de Varreduras (Auditoria SQLite)")
-        
-        # Ajuste do mapeamento de colunas para exibição amigável
-        df_exibicao = df_db.copy()
-        df_exibicao.columns = [
-            'ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada', 
-            'Stop Loss', 'Alvo', 'Status', 'Preço Saída', 'Resultado Fin.'
-        ][:len(df_exibicao.columns)]
-        
-        st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
-    else:
-        st.info("Nenhum registro gravado nas tabelas locais até o momento.")
+st.subheader("🗄️ Histórico Completo de Varreduras (Auditoria SQLite)")
+# Ajuste do mapeamento de colunas para exibição amigável
+df_exibicao = df_db.copy()df_exibicao.columns = ['ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada','Stop Loss', 'Alvo', 'Status', 'Preço Saída', 'Resultado Fin.'][:len(df_exibicao.columns)]st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
+else:st.info("Nenhum registro gravado nas tabelas locais até o momento.")
+else:print("Módulo de Interface carregado em modo silencioso/CLI.")
