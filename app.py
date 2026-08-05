@@ -198,7 +198,6 @@ def processar_mercado_duplo():
     if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(5)
     
     return df_ex, df_ret
-
 # =====================================================================
 # INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
 # =====================================================================
@@ -231,7 +230,7 @@ with tab_monitoramento:
             )
             # Se o usuário clicar em uma linha, captura o ativo correspondente
             if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                idx_linha = sel_ret["selection"]["rows"][0]
+                idx_linha = sel_ret["selection"]["rows"]
                 ativo_final = df_retomada.iloc[idx_linha]['Ativo']
         else:
             st.info("Nenhuma ação em reversão de alta.")
@@ -245,7 +244,7 @@ with tab_monitoramento:
                 selection_mode="single-row", on_select="rerun"
             )
             if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                idx_linha = sel_ex["selection"]["rows"][0]
+                idx_linha = sel_ex["selection"]["rows"]
                 ativo_final = df_exaustao.iloc[idx_linha]['Ativo']
         else:
             st.info("Nenhuma ação em pânico institucional.")
@@ -313,7 +312,6 @@ with tab_monitoramento:
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop Loss", annotation_position="bottom right")
 
                 # ESTRELA DO GRÁFICO: Remoção cirúrgica dos horários em que o mercado fica parado
-                # O rangebreaks do Plotly retira gaps de noites e finais de semana
                 fig.update_xaxes(
                     rangebreaks=[
                         dict(bounds=["sat", "mon"]), # Oculta os finais de semana (Sábado e Domingo)
@@ -333,8 +331,8 @@ with tab_monitoramento:
                 
                 st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para manter o risco fixado em R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
 
-                # Chamada da IA online para contextualização de suporte/resistência ou notícia
-                with St.spinner("Interpretando fatos de mercado..."):
+                # CORREÇÃO EFETUADA: Mudança de 'St' para 'st' minúsculo
+                with st.spinner("Interpretando fatos de mercado..."):
                     feed = buscar_noticias_reais_yfinance(ticker_yf)
                     contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
                 st.info(f"📰 **Contexto IA:** {contexto_ia}")
@@ -355,3 +353,4 @@ with tab_historico:
         st.dataframe(df_db, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum registro gravado nas tabelas locais até o momento.")
+
