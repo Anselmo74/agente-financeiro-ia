@@ -324,7 +324,8 @@ with tab_monitoramento:
                 selection_mode="single-row", on_select="rerun"
             )
             if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                ativo_final = str(df_retomada.iloc[sel_ret["selection"]["rows"]]['Ativo']).strip()
+                idx_linha = sel_ret["selection"]["rows"]
+                ativo_final = str(df_retomada.iloc[idx_linha]['Ativo']).strip()
         else:
             st.info("Nenhuma ação em reversão de alta.")
 
@@ -337,7 +338,8 @@ with tab_monitoramento:
                 selection_mode="single-row", on_select="rerun"
             )
             if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                ativo_final = str(df_exaustao.iloc[sel_ex["selection"]["rows"]]['Ativo']).strip()
+                idx_linha = sel_ex["selection"]["rows"]
+                ativo_final = str(df_exaustao.iloc[idx_linha]['Ativo']).strip()
         else:
             st.info("Nenhuma ação em pânico institucional.")
 
@@ -356,7 +358,7 @@ with tab_monitoramento:
         periodo_yf = map_periodo[periodo_opcao]
         candle_yf = map_candle[candle_opcao]
 
-        # FALLBACK AUTOMÁTICO DO GRÁFICO: Se o mercado estiver fechado e a opção for 1d, expande o range para carregar o último pregão
+        # FALLBACK AUTOMÁTICO DO GRÁFICO: Evita tela vazia fora do horário comercial
         if (horario_atual_br.weekday() >= 5 or horario_atual_br.hour < 10 or horario_atual_br.hour >= 18) and (periodo_yf == "1d"):
             periodo_yf = "5d"
 
@@ -367,11 +369,10 @@ with tab_monitoramento:
             if not dados.empty:
                 dados = dados.dropna(subset=['Close', 'Volume'])
 
-                # Caso tenha forçado o fallback de 5 dias mas o usuário queria ver o intraday das últimas horas do último pregão
+                # Ajustes finos de enquadramento do fallback de tempo
                 if periodo_opcao == "Últimas Horas" and len(dados) > 16:
                     dados = dados.tail(16)
                 elif periodo_opcao == "1 dia (Intraday)" and len(dados) > 28:
-                    # Isola apenas os candles equivalentes ao último dia completo de pregão comercializado
                     dados = dados.tail(28)
 
                 preco_atual = float(dados['Close'].iloc[-1])
@@ -401,8 +402,14 @@ with tab_monitoramento:
                 fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo", annotation_position="top right", row=1, col=1)
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop", annotation_position="bottom right", row=1, col=1)
 
-                # Remove finais de semana e noites para o gráfico ficar contínuo e limpo
-                fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=, pattern="hour")])
+                # CORREÇÃO EFETUADA: Preenchidos os limites do rangebreaks para remover noites (das 18h às 10h)
+                fig.update_xaxes(
+                    rangebreaks=[
+                        dict(bounds=["sat", "mon"]), 
+                        dict(bounds=[18, 10], pattern="hour")
+                    ]
+                )
+                
                 fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 
                 st.plotly_chart(fig, use_container_width=True)
@@ -426,4 +433,5 @@ with tab_historico:
         st.dataframe(df_db, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum registro gravado nas tabelas locais até o momento.")
+
 
