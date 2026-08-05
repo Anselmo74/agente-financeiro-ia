@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Silenciar avisos e logs secundários do terminal para otimizar processamento
+# Silenciar avisos e logs secundários do terminal
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
@@ -32,7 +32,6 @@ try:
     TOKEN_TELEGRAM = st.secrets["TOKEN_TELEGRAM"]
     CHAT_ID_TELEGRAM = st.secrets["CHAT_ID_TELEGRAM"]
 except Exception:
-    # Fallbacks de segurança para testes locais antes do deploy
     URL_IA_PROXIMIDADE = "https://openrouter.ai"
     API_KEY_IA = "fd10bd41-3d8f-50da-8a73-716eef2ec764"
     TOKEN_TELEGRAM = "8852525281:AAH56WNVEmmXyxvol9RKmkB3aa1Toap1QoY"
@@ -43,17 +42,16 @@ LIMITE_LIQUIDEZ_DIARIA = 1000000.00
 DB_NAME = "trades_historico.db"
 
 # =====================================================================
-# CONTROLE DE HORÁRIO BRASÍLIA (UTC -3)
+# CONTROLE DE HORÁRIO E DATA BRASÍLIA (UTC -3)
 # =====================================================================
 def obter_horario_brasilia():
     """Retorna o objeto datetime convertido rigorosamente para o fuso UTC-3."""
     return datetime.utcnow() - timedelta(hours=3)
 
 # =====================================================================
-# MÓDULO DE BANCO DE DADOS (HISTÓRICO SIMPLIFICADO DE CONSULTAS)
+# MÓDULO DE BANCO DE DADOS (SQLITE COM AUDITORIA)
 # =====================================================================
 def inicializar_banco():
-    """Cria a tabela para armazenar as oportunidades geradas no clique."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -71,34 +69,25 @@ def inicializar_banco():
     conn.close()
 
 def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
-    """Grava as detecções do momento do carregamento sem duplicar no mesmo dia."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     agora_br = obter_horario_brasilia()
     hoje_str = agora_br.strftime("%Y-%m-%d")
     
-    cursor.execute("""
-        SELECT id FROM historico_sinais 
-        WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?
-    """, (ticker, estrategia, f"{hoje_str}%"))
-    
+    cursor.execute("SELECT id FROM historico_sinais WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?", (ticker, estrategia, f"{hoje_str}%"))
     if cursor.fetchone() is None:
         data_atual_br = agora_br.strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("""
-            INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (data_atual_br, ticker, estrategia, preco, stop, alvo))
+        cursor.execute("INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo) VALUES (?, ?, ?, ?, ?, ?)", 
+                       (data_atual_br, ticker, estrategia, preco, stop, alvo))
         conn.commit()
     conn.close()
 
 def carregar_historico_banco():
-    """Recupera os registros salvos sob demanda para auditoria visual."""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM historico_sinais ORDER BY id DESC", conn)
     conn.close()
     return df
 
-# Inicializa o banco local
 inicializar_banco()
 
 def obter_universo_b3():
@@ -152,20 +141,20 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
     except: pass
     return f"Ajuste técnico de carteiras institucionais perto de R$ {preco:.2f}."
 
-@st.cache_data(ttl=30)  # Reduzido para 30 segundos para dar máxima agilidade ao clique
+@st.cache_data(ttl=60)
 def processar_mercado_duplo(lista_ativos_custom=None):
-    """Varre a B3 extraindo os dados atuais ou consolidados do último fechamento."""
+    """Varre a B3, classifica os ativos em TOP 10, calcula volume rel. e audita no SQLite."""
     lista_trabalho = lista_ativos_custom if lista_ativos_custom is not None else obter_universo_b3()
     pool_exaustao = []
     pool_retomada = []
 
-    # Janela estável de 7 dias para garantir histórico de cálculo mesmo no fim de semana
+    agora_br = obter_horario_brasilia()
     periodo_scan = "7d"
 
     for ticker in lista_trabalho:
         try:
             df = yf.download(ticker, period=periodo_scan, interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
-            if df.empty or len(df) < 20: continue
+            if df.empty or len(df) < 25: continue
             df = df.dropna(subset=['Close', 'Volume'])
             
             fechamentos = df['Close'].squeeze()
@@ -189,10 +178,10 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             if vol_ratio >= 1.0:
                 desvio_vol_str = f"🚀 Acima ({vol_ratio * 100:.1f}%)"
             else:
-                desvio_vol_str = f"📉 Abaixo ({vol_ratio * 100:.1f}%)"
+                desvio_vol_str = f"降低 Abaixo ({vol_ratio * 100:.1f}%)"
 
             # -----------------------------------------------------------------
-            # Motor 1: Pânico de Venda / Exaustão
+            # Motor 1: Pânico de Venda
             # -----------------------------------------------------------------
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             ifr_atual = float(df['IFR'].iloc[-1])
@@ -202,7 +191,6 @@ def processar_mercado_duplo(lista_ativos_custom=None):
                 stop_loss = preco_atual - dist_stop
                 alvo_lucro = preco_atual + (dist_stop * 1.5)
                 
-                # Salva a oportunidade no banco instantaneamente no momento da consulta
                 if lista_ativos_custom is None:
                     salvar_sinal_no_banco(ticker.replace('.SA',''), "Pânico de Venda", preco_atual, stop_loss, alvo_lucro)
                 
@@ -246,11 +234,12 @@ def processar_mercado_duplo(lista_ativos_custom=None):
     
     return df_ex, df_ret
 
+
 # =====================================================================
 # INTERFACE VISUAL PRINCIPAL (STREAMLIT APP UI)
 # =====================================================================
 horario_atual_br = obter_horario_brasilia()
-st.title("🤖 AGENTE FINANCEIRO IA: Painel Analítico On-Demand B3")
+st.title("🤖 AGENTE FINANCEIRO IA: Painel Analítico On-Demand B3 Pro")
 st.markdown(f"**Fuso Horário:** Brasília (UTC -3) | **Última Varredura:** {horario_atual_br.strftime('%d/%m/%Y %H:%M:%S')}")
 
 st.sidebar.markdown("### 🏢 Modelo Operacional")
@@ -329,23 +318,19 @@ with tab_monitoramento:
             st.info("Nenhuma ação em pânico de venda institucional.")
 
     with col_direita:
-        st.subheader(f"📊 Análise de Preço e Volume: {ativo_final}")
+        st.subheader(f"📊 Painel Analítico de Preço e Volume: {ativo_final}")
 
         c1, c2 = st.columns(2)
         with c1:
-            periodo_opcao = st.selectbox("Período Histórico:", ["1 dia (Intraday)", "Últimas Horas", "5 dias", "1 mês"])
+            periodo_opcao = st.selectbox("Período Histórico:", ["1 dia (Último Pregão)", "Últimas Horas", "5 dias", "1 mês"])
         with c2:
             candle_opcao = st.selectbox("Tempo do Candle (Tempo Gráfico):", ["15 minutos", "5 minutos", "30 minutos", "1 hora", "1 dia", "1 semana"], index=0)
 
-        map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
+        map_periodo = {"1 dia (Último Pregão)": "7d", "Últimas Horas": "7d", "5 dias": "7d", "1 mês": "1mo"}
         map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
 
         periodo_yf = map_periodo[periodo_opcao]
         candle_yf = map_candle[candle_opcao]
-
-        # FALLBACK AUTOMÁTICO FORA DE PREGÃO: Se a bolsa estiver fechada e a opção for 1d, força 7d para capturar o último pregão
-        if (horario_atual_br.weekday() >= 5 or horario_atual_br.hour < 10 or horario_atual_br.hour >= 18) and (periodo_yf == "1d"):
-            periodo_yf = "7d"
 
         try:
             ticker_yf = f"{ativo_final}.SA"
@@ -354,11 +339,19 @@ with tab_monitoramento:
             if not dados.empty:
                 dados = dados.dropna(subset=['Close', 'Volume'])
 
-                # Enquadramento preciso dos candles históricos
-                if periodo_opcao == "Últimas Horas" and len(dados) > 16:
+                # Camada Inteligente de Filtragem de Horários Estáticos baseada no calendário da B3
+                dados['Data_Apenas'] = dados.index.date
+                datas_unicas = sorted(list(set(dados['Data_Apenas'])))
+
+                # Filtro estratégico solicitado para isolar o intraday do último pregão com 15m
+                if periodo_opcao == "1 dia (Último Pregão)" and len(datas_unicas) >= 1:
+                    ultima_data_negociada = datas_unicas[-1]
+                    dados = dados[dados['Data_Apenas'] == ultima_data_negociada]
+                elif periodo_opcao == "Últimas Horas":
                     dados = dados.tail(16)
-                elif (periodo_opcao == "1 dia (Intraday)" or periodo_yf == "7d") and len(dados) > 28:
-                    dados = dados.tail(28)
+                elif periodo_opcao == "5 dias" and len(datas_unicas) > 5:
+                    ultimas_5_datas = datas_unicas[-5:]
+                    dados = dados[dados['Data_Apenas'].isin(ultimas_5_datas)]
 
                 preco_atual = float(dados['Close'].iloc[-1])
 
@@ -374,7 +367,7 @@ with tab_monitoramento:
 
                 # Cartões de Métricas com Medidor de Volatilidade Estática (ATR)
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Último Preço", f"R$ {preco_atual:.2f}")
+                m1.metric("Preço Analisado", f"R$ {preco_atual:.2f}")
                 m2.metric("Stop Loss", f"R$ {stop_loss:.2f}")
                 m3.metric("Alvo Projetado", f"R$ {alvo_lucro:.2f}")
                 m4.metric("Volatilidade (ATR)", f"R$ {atr_calc:.2f}")
@@ -388,7 +381,7 @@ with tab_monitoramento:
                 fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Close'], name='Preço', line=dict(color='#2ca02c', width=2.5)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=dados.index.astype(str), y=dados['Média Ref (20)'], name='Média 20', line=dict(color='#ff7f0e', width=1.5)), row=1, col=1)
 
-                # Painel 2: Barras de Volume com Realce Institucional (Fica vermelho se estiver 20% acima da média)
+                # Painel 2: Barras de Volume Proporcional com Realce de Fluxo Acima da Média
                 coloracao_volume = ['#d62728' if v > m * 1.2 else '#1f77b4' for v, m in zip(dados['Volume'], volume_medio_recente)]
                 fig.add_trace(go.Bar(x=dados.index.astype(str), y=dados['Volume'], name='Volume do Candle', marker=dict(color=coloracao_volume)), row=2, col=1)
 
@@ -396,7 +389,7 @@ with tab_monitoramento:
                 fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo", annotation_position="top right", row=1, col=1)
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop", annotation_position="bottom right", row=1, col=1)
 
-                # Desenha o eixo X de forma contínua por categoria, eliminando linhas mortas de noites e finais de semana
+                # Mantém o eixo contínuo e limpo por categorias, eliminando linhas mortas de finais de semana
                 fig.update_xaxes(type='category')
                 fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=520, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 
@@ -410,10 +403,3 @@ with tab_monitoramento:
             else:
                 st.error("Não foram encontrados dados históricos para renderizar este ativo fora do pregão.")
         except Exception as e:
-            st.error(f"Erro ao carregar painel visual: {str(e)}")
-
-# Aba de Histórico SQLite e Auditoria de Cliques
-with tab_historico:
-    st.subheader("🗄️ Histórico de Consultas e Oportunidades Identificadas")
-
-
