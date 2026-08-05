@@ -325,7 +325,7 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
     return f"Ajuste técnico de carteiras institucionais perto de R$ {preco:.2f}."
 
 # =====================================================================
-# INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
+# INTERFACE VISUAL AVANÇADA - PARTE A (STREAMLIT APP UI)
 # =====================================================================
 # Garante a renderização do bloco de interface apenas se estiver no Streamlit
 if RODANDO_NO_STREAMLIT:
@@ -379,9 +379,12 @@ if RODANDO_NO_STREAMLIT:
             else:
                 st.info("Nenhuma ação em pânico institucional.")
 
-        # Resgata o ativo estável do session_state
+        # Resgata o ativo estável selecionado pelo investidor para processamento gráfico
         ativo_final = st.session_state["ativo_selecionado"]
 
+        # =====================================================================
+        # INTERFACE VISUAL AVANÇADA - PARTE B (PLOTLY E PERFORMANCE)
+        # =====================================================================
         with col_direita:
             st.subheader(f"📊 Análise Visual do Preço: {ativo_final}")
 
@@ -507,9 +510,17 @@ if RODANDO_NO_STREAMLIT:
                 st.info("Aguardando o encerramento do primeiro trade pelo simulador de background para calcular estatísticas matemáticas.")
 
             st.markdown("---")
-
-st.subheader("🗄️ Histórico Completo de Varreduras (Auditoria SQLite)")
-# Ajuste do mapeamento de colunas para exibição amigável
-df_exibicao = df_db.copy()df_exibicao.columns = ['ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada','Stop Loss', 'Alvo', 'Status', 'Preço Saída', 'Resultado Fin.'][:len(df_exibicao.columns)]st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
-else:st.info("Nenhum registro gravado nas tabelas locais até o momento.")
-else:print("Módulo de Interface carregado em modo silencioso/CLI.")
+            st.subheader("🗄️ Histórico Completo de Varreduras (Auditoria SQLite)")
+            
+            # Ajuste do mapeamento de colunas para exibição amigável
+            df_exibicao = df_db.copy()
+            df_exibicao.columns = [
+                'ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada', 
+                'Stop Loss', 'Alvo', 'Status', 'Preço Saída', 'Resultado Fin.'
+            ][:len(df_exibicao.columns)]
+            
+            st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhum registro gravado nas tabelas locais até o momento.")
+else:
+    print("Módulo de Interface carregado em modo silencioso/CLI.")
