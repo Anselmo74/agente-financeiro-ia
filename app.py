@@ -83,9 +83,22 @@ inicializar_banco()
 def obter_universo_b3():
     """Lista higienizada de ativos focos."""
     tickers_base = [
-        "CMIN3", "UGPA3", "EMBR3", "VALE3", "PETR4", "ITUB4", "BBDC4", "BBAS3", 
-        "WEGE3", "RENT3", "PRIO3", "SBSP3", "SUZB3", "JBSS3", "LREN3", "RAIL3",
-        "ABEV3", "B3SA3", "BBSE3", "RADL3", "HAPV3", "GGBR4", "CSNA3", "MGLU3"
+        "RRRP3", "ALOS3", "ALPA4", "ABEV3", "ARZZ3", "ASAI3", "AZUL4", "B3SA3", "BBSE3", "BBDC3",
+        "BBDC4", "BRAP4", "BBAS3", "BRKM5", "BRFS3", "BPAC11", "CRFB3", "CCRO3", "CMIG4",
+        "COGN3", "CPLE6", "CSAN3", "CPFE3", "CMIN3", "CVCB3", "CYRE3", "DXCO3", "ELET3", "ELET6",
+        "EMBR3", "ENGI11", "ENEV3", "EGIE3", "EQTL3", "EZTC3", "FLRY3", "GGBR4", "GOAU4",
+        "NTCO3", "HAPV3", "HYBR3", "IGTI11", "IRBR3", "ITSA4", "ITUB4", "JBSS3", "JHSF3",
+        "KLBN11", "RENT3", "LREN3", "MDIA3", "MGLU3", "MRVE3", "MULT3", "PCAR3", "PETR3", "PETR4",
+        "RECV3", "PRIO3", "PETZ3", "RADL3", "RAIZ4", "RDOR3", "RAIL3", "SBSP3", "SANB11", "SMTO3",
+        "STBP3", "SUZB3", "TAEE11", "VIVT3", "TIMS3", "TOTS3", "TRPL4", "UGPA3", "USIM5",
+        "VALE3", "VAMO3", "VBBR3", "WEGE3", "YDUQ3", "AERI3", "AURE3", "AMER3", "ARML3",
+        "BLAU3", "CAML3", "CASH3", "CEAB3", "CLSA3", "CSNA3", "CURY3", "DIRR3", "EVEN3", 
+        "FESA4", "FIQE3", "GGRC11", "GMAT3", "GRND3", "GUAR3", "IFCM3", "INTB3", "JALL3",
+        "KEPL3", "LAND3", "LAVV3", "LOGG3", "LOGN3", "AMBP3", "LWSA3", "MATD3", "MEAL3",
+        "MELK3", "MOVI3", "MYPK3", "NEOE3", "ODPV3", "ONCO3", "ORVR3", "PGMN3", "PLPL3",
+        "PNVL3", "POMO4", "POSI3", "PRNR3", "QUAL3", "RAPT4", "RCSL4", "ROMI3", "SEQL3", 
+        "SIMH3", "SLCE3", "TASA4", "TECN3", "TEND3", "TGMA3", "TRIS3", "TTEN3", "TUPY3", 
+        "UNIP6", "VIVA3", "VLID3", "ZAMP3"
     ]
     return sorted(list(set([f"{t}.SA" for t in tickers_base])))
 
