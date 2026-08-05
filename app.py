@@ -77,7 +77,7 @@ def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
     
     cursor.execute("SELECT id FROM historico_sinais WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?", (ticker, estrategia, f"{hoje_str}%"))
     if cursor.fetchone() is None:
-        data_atual_br = agora_br.strftime("%Y-%m-%d %H:%M:%S")
+        data_atual_br = data_atual_br = agora_br.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("INSERT INTO historico_sinais (data_hora, ticker, estrategia, preco_entrada, stop_loss, alvo) VALUES (?, ?, ?, ?, ?, ?)", 
                        (data_atual_br, ticker, estrategia, preco, stop, alvo))
         conn.commit()
@@ -158,20 +158,19 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
 
 @st.cache_data(ttl=60)
 def processar_mercado_duplo(lista_ativos_custom=None):
-    """Varre a B3 analisando tanto o universo fixo quanto ativos customizados informados no lote."""
-    # Se receber uma lista customizada, processa apenas ela; caso contrário, roda o universo global
+    """Varre a B3 de forma híbrida e purificada: analisa o universo fixo ou customizado em lote."""
     lista_trabalho = lista_ativos_custom if lista_ativos_custom is not None else obter_universo_b3()
     pool_exaustao = []
     pool_retomada = []
 
     agora_br = obter_horario_brasilia()
-    # FALLBACK DE PREGÃO: Força o download de um range maior para garantir dados mesmo em fins de semana e noites
-    periodo_scan = "5d" if agora_br.weekday() < 5 else "7d"
+    # Puxa 7 dias fixos para garantir cauda de dados e cálculo correto de indicadores nos finais de semana
+    periodo_scan = "7d"
 
     for ticker in lista_trabalho:
         try:
             df = yf.download(ticker, period=periodo_scan, interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
-            if df.empty or len(df) < 25: continue
+            if df.empty or len(df) < 20: continue
             df = df.dropna(subset=['Close', 'Volume'])
             
             fechamentos = df['Close'].squeeze()
@@ -180,7 +179,6 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             df['Vol_Financeiro'] = fechamentos * volumes
             liquidez_diaria = float(df['Vol_Financeiro'].rolling(window=20).mean().iloc[-1]) * 28
 
-            # Ignora o filtro de liquidez mínima se for uma análise direcionada pelo usuário
             if lista_ativos_custom is None and liquidez_diaria < LIMITE_LIQUIDEZ_DIARIA: continue
             
             preco_atual = float(fechamentos.iloc[-1])
@@ -198,11 +196,10 @@ def processar_mercado_duplo(lista_ativos_custom=None):
             else:
                 desvio_vol_str = f"📉 Abaixo (-{(1.0 - vol_ratio)*100:.1f}%)"
 
-            # Atualiza o status de confirmação das ordens pendentes
             atualizar_confirmacoes_no_banco(ticker.replace('.SA',''), preco_atual)
 
             # -----------------------------------------------------------------
-            # Motor 1: Exaustão de Venda (Pânico)
+            # Motor 1: Exaustão de Venda (Substituído termo inadequado por Pânico)
             # -----------------------------------------------------------------
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             ifr_atual = float(df['IFR'].iloc[-1])
@@ -212,14 +209,13 @@ def processar_mercado_duplo(lista_ativos_custom=None):
                 stop_loss = preco_atual - dist_stop
                 alvo_lucro = preco_atual + (dist_stop * 1.5)
                 
-                # Grava no banco apenas se estiver nos horários chave oficiais do pregão ativo
                 hora_minuto_str = agora_br.strftime("%H:%M")
                 if hora_minuto_str in ["10:30", "11:30", "12:30", "15:00", "16:30", "17:15"] and lista_ativos_custom is None:
-                    salvar_sinal_no_banco(ticker.replace('.SA',''), "Exaustão de Venda", preco_atual, stop_loss, alvo_lucro)
+                    salvar_sinal_no_banco(ticker.replace('.SA',''), "Pânico de Venda", preco_atual, stop_loss, alvo_lucro)
                 
                 pool_exaustao.append({
                     'Ativo': ticker.replace('.SA', ''), 'Preço (R$)': round(preco_atual, 2), 
-                    'IFR': round(ifr_atual, 2), 'Fluxo Vol': desvio_vol_str, 'atr': atr_atual, 'Diagnóstico': 'Exaustão de Venda'
+                    'IFR': round(ifr_atual, 2), 'Fluxo Vol': desvio_vol_str, 'atr': atr_atual, 'Diagnóstico': 'Pânico de Venda'
                 })
 
             # -----------------------------------------------------------------
@@ -250,7 +246,6 @@ def processar_mercado_duplo(lista_ativos_custom=None):
     df_ex = pd.DataFrame(pool_exaustao) if pool_exaustao else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol', 'atr', 'Diagnóstico'])
     df_ret = pd.DataFrame(pool_retomada) if pool_retomada else pd.DataFrame(columns=['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol', 'atr', 'Momentum', 'Diagnóstico'])
     
-    # Ranquear até o TOP 10 se for a varredura automática padrão
     if lista_ativos_custom is None:
         if not df_ex.empty: df_ex = df_ex.sort_values(by='IFR', ascending=True).head(10)
         if not df_ret.empty: df_ret = df_ret.sort_values(by='Momentum', ascending=False).head(10)
@@ -329,8 +324,8 @@ with tab_monitoramento:
         else:
             st.info("Nenhuma ação em reversão de alta.")
 
-        # Tabela Interativa de Exaustão (Top 10)
-        st.markdown("**💥 Top 10 - Clímax / Exaustão de Venda**")
+        # Tabela Interativa de Exaustão / Pânico (Top 10)
+        st.markdown("**💥 Top 10 - Pânico / Exaustão de Venda**")
         if not df_exaustao.empty:
             sel_ex = st.dataframe(
                 df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Fluxo Vol']], 
@@ -341,7 +336,7 @@ with tab_monitoramento:
                 idx_linha = sel_ex["selection"]["rows"]
                 ativo_final = str(df_exaustao.iloc[idx_linha]['Ativo']).strip()
         else:
-            st.info("Nenhuma ação em pânico institucional.")
+            st.info("Nenhuma ação em pânico de venda institucional.")
 
     with col_direita:
         st.subheader(f"📊 Painel Analítico Híbrido: {ativo_final}")
@@ -358,9 +353,9 @@ with tab_monitoramento:
         periodo_yf = map_periodo[periodo_opcao]
         candle_yf = map_candle[candle_opcao]
 
-        # FALLBACK AUTOMÁTICO DO GRÁFICO: Evita tela vazia fora do horário comercial
+        # FALLBACK HISTÓRICO CORRIGIDO: Força 7 dias para garantir desenho completo se o pregão estiver fechado
         if (horario_atual_br.weekday() >= 5 or horario_atual_br.hour < 10 or horario_atual_br.hour >= 18) and (periodo_yf == "1d"):
-            periodo_yf = "5d"
+            periodo_yf = "7d"
 
         try:
             ticker_yf = f"{ativo_final}.SA"
@@ -369,10 +364,10 @@ with tab_monitoramento:
             if not dados.empty:
                 dados = dados.dropna(subset=['Close', 'Volume'])
 
-                # Ajustes finos de enquadramento do fallback de tempo
+                # Enquadramento preciso de dados passados
                 if periodo_opcao == "Últimas Horas" and len(dados) > 16:
                     dados = dados.tail(16)
-                elif periodo_opcao == "1 dia (Intraday)" and len(dados) > 28:
+                elif (periodo_opcao == "1 dia (Intraday)" or periodo_yf == "7d") and len(dados) > 28:
                     dados = dados.tail(28)
 
                 preco_atual = float(dados['Close'].iloc[-1])
@@ -392,7 +387,7 @@ with tab_monitoramento:
                 m2.metric("Stop Loss Calculado", f"R$ {stop_loss:.2f}")
                 m3.metric("Alvo Projetado", f"R$ {alvo_lucro:.2f}")
 
-                # Gráfico com Painel Superior de Preço e Painel Inferior de Volume
+                # Gráfico Duplo Profissional
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_width=[0.3, 0.7])
 
                 fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Preço', line=dict(color='#2ca02c', width=2.5)), row=1, col=1)
@@ -402,14 +397,8 @@ with tab_monitoramento:
                 fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo", annotation_position="top right", row=1, col=1)
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop", annotation_position="bottom right", row=1, col=1)
 
-                # CORREÇÃO EFETUADA: Preenchidos os limites do rangebreaks para remover noites (das 18h às 10h)
-                fig.update_xaxes(
-                    rangebreaks=[
-                        dict(bounds=["sat", "mon"]), 
-                        dict(bounds=[18, 10], pattern="hour")
-                    ]
-                )
-                
+                # CORREÇÃO DEFINITIVA DO GRÁFICO: Ignora lacunas mantendo indexação contínua para evitar congelamentos fora do pregão
+                fig.update_xaxes(type='category')
                 fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=10, b=20), height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 
                 st.plotly_chart(fig, use_container_width=True)
@@ -433,5 +422,3 @@ with tab_historico:
         st.dataframe(df_db, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum registro gravado nas tabelas locais até o momento.")
-
-
