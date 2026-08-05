@@ -7,36 +7,33 @@ import time
 import warnings
 import logging
 import sqlite3
+import plotly.graph_objects as go
 from datetime import datetime
 
-# Configuração de Layout da Página Web Streamlit (Obrigatório ser o primeiro comando)
+# Configuração de Layout da Página Web (Obrigatório ser o primeiro comando)
 st.set_page_config(
     page_title="Agente IA Financeiro B3",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Silenciar avisos e logs secundários do terminal para otimizar performance
+# Silenciar avisos e logs secundários
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # =====================================================================
-# PARÂMETROS E CONFIGURAÇÕES DO AGENTE IA
+# CONFIGURAÇÕES GLOBAIS
 # =====================================================================
 URL_IA_PROXIMIDADE = "https://openrouter.ai"
 API_KEY_IA = "fd10bd41-3d8f-50da-8a73-716eef2ec764"
 
 RISCO_MAXIMO_FINANCEIRO = 1000.00
-LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Mínimo de R$ 1 Milhão/dia
+LIMITE_LIQUIDEZ_DIARIA = 1000000.00
 
-# =====================================================================
-# MÓDULO DE BANCO DE DADOS (SQLITE INTEGRADO)
-# =====================================================================
 DB_NAME = "trades_historico.db"
 
 def inicializar_banco():
-    """Cria o banco de dados e a tabela de histórico se não existirem."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -55,17 +52,13 @@ def inicializar_banco():
     conn.close()
 
 def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
-    """Grava o sinal gerado pelo scanner evitando duplicidade no mesmo dia."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     hoje = datetime.now().strftime("%Y-%m-%d")
-    
-    # Verifica se o ativo já foi registrado hoje na mesma estratégia para não poluir o banco
     cursor.execute("""
         SELECT id FROM historico_sinais 
         WHERE ticker = ? AND estrategia = ? AND data_hora LIKE ?
     """, (ticker, estrategia, f"{hoje}%"))
-    
     if cursor.fetchone() is None:
         data_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("""
@@ -76,20 +69,14 @@ def salvar_sinal_no_banco(ticker, estrategia, preco, stop, alvo):
     conn.close()
 
 def carregar_historico_banco():
-    """Retorna o histórico de sinais armazenados como um DataFrame do Pandas."""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM historico_sinais ORDER BY id DESC", conn)
     conn.close()
     return df
 
-# Inicializa a estrutura de banco de dados na inicialização do app
 inicializar_banco()
 
-# =====================================================================
-# FUNÇÕES MATEMÁTICAS E AUXILIARES
-# =====================================================================
 def obter_universo_b3():
-    """Retorna a lista selecionada e higienizada de ativos focos para a varredura."""
     tickers_base = [
         "CMIN3", "UGPA3", "EMBR3", "VALE3", "PETR4", "ITUB4", "BBDC4", "BBAS3", 
         "WEGE3", "RENT3", "PRIO3", "SBSP3", "SUZB3", "JBSS3", "LREN3", "RAIL3",
@@ -98,7 +85,6 @@ def obter_universo_b3():
     return sorted(list(set([f"{t}.SA" for t in tickers_base])))
 
 def calcular_ifr_professional(series, periodos=14):
-    """Calcula o Índice de Força Relativa com suavização exponencial."""
     delta = series.diff()
     ganho = delta.clip(lower=0)
     perda = -delta.clip(upper=0)
@@ -118,7 +104,7 @@ def buscar_noticias_reais_yfinance(ticker):
     return "Nenhuma manchete recente encontrada no feed."
 
 def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
-    """Consulta o OpenRouter para interpretar o cenário do papel em 15 palavras."""
+    """Consulta o OpenRouter para interpretar o cenário do papel em 15 words."""
     headers = {
         "Authorization": f"Bearer {API_KEY_IA}", 
         "Content-Type": "application/json"
@@ -139,7 +125,7 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
     except: pass
     return f"Ajuste técnico de carteiras institucionais perto de R$ {preco:.2f}."
 
-@st.cache_data(ttl=300)  # Cache de dados por 5 minutos para performance estável
+@st.cache_data(ttl=120)  # Reduzido para 2 minutos para maior dinamismo intraday
 def processar_mercado_duplo():
     """Varre o universo selecionado da B3, classifica os ativos e salva no SQLite."""
     lista_ativos = obter_universo_b3()
@@ -148,6 +134,7 @@ def processar_mercado_duplo():
 
     for ticker in lista_ativos:
         try:
+            # Varredura padrão em 15m para alimentar os rankings
             df = yf.download(ticker, period="5d", interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
             if df.empty or len(df) < 30: continue
             df = df.dropna(subset=['Close', 'Volume'])
@@ -168,9 +155,7 @@ def processar_mercado_duplo():
             df['Vol_Quantidade_Media'] = volumes.rolling(window=20).mean()
             vol_ratio = float(volumes.iloc[-1] / df['Vol_Quantidade_Media'].iloc[-1])
 
-            # -----------------------------------------------------------------
             # Motor 1: Exaustão de Venda (Pânico)
-            # -----------------------------------------------------------------
             df['IFR'] = calcular_ifr_professional(fechamentos, periodos=14)
             ifr_atual = float(df['IFR'].iloc[-1])
 
@@ -179,7 +164,6 @@ def processar_mercado_duplo():
                 stop_loss = preco_atual - dist_stop
                 alvo_lucro = preco_atual + (dist_stop * 1.5)
                 
-                # Gravação imediata de auditoria no SQLite
                 salvar_sinal_no_banco(ticker.replace('.SA',''), "Exaustão de Venda", preco_atual, stop_loss, alvo_lucro)
                 
                 pool_exaustao.append({
@@ -187,9 +171,7 @@ def processar_mercado_duplo():
                     'IFR': round(ifr_atual, 2), 'Vol_Ratio': round(vol_ratio, 2), 'atr': atr_atual
                 })
 
-            # -----------------------------------------------------------------
             # Motor 2: Retomada de Subida (Tendência)
-            # -----------------------------------------------------------------
             df['EMA_9'] = fechamentos.ewm(span=9, adjust=False).mean()
             df['EMA_21'] = fechamentos.ewm(span=21, adjust=False).mean()
             df['Donchian_High'] = df['High'].rolling(window=20).max()
@@ -201,7 +183,6 @@ def processar_mercado_duplo():
                 stop_loss = preco_atual - dist_stop
                 alvo_lucro = preco_atual + (dist_stop * 2.0)
                 
-                # Gravação imediata de auditoria no SQLite
                 salvar_sinal_no_banco(ticker.replace('.SA',''), "Retomada de Subida", preco_atual, stop_loss, alvo_lucro)
                 
                 pool_retomada.append({
@@ -219,113 +200,158 @@ def processar_mercado_duplo():
     return df_ex, df_ret
 
 # =====================================================================
-# INTERFACE VISUAL PRINCIPAL (STREAMLIT APP UI)
+# INTERFACE VISUAL AVANÇADA (STREAMLIT APP UI)
 # =====================================================================
-st.title("🤖 AGENTE FINANCEIRO IA: Monitoramento & Auditoria B3")
+st.title("🤖 AGENTE FINANCEIRO IA: Painel Quantitativo Avançado")
 st.markdown("---")
 
-# Executa o processamento do mercado em segundo plano
-with st.spinner("Varrendo o book de ofertas da B3 e alimentando o banco SQLite..."):
-    df_exaustao, df_retomada = processar_mercado_duplo()
+# Abas principais da ferramenta
+tab_monitoramento, tab_historico = st.tabs(["📊 Gráficos & Sinais Online", "🗄️ Histórico SQLite"])
 
-# Criação das Abas de Navegação Estratégica
-tab_monitoramento, tab_historico = st.tabs(["📊 Monitoramento em Tempo Real", "🗄️ Histórico de Sinais (SQLite)"])
-
-# ---------------------------------------------------------------------
-# ABA 1: MONITORAMENTO EM TEMPO REAL
-# ---------------------------------------------------------------------
 with tab_monitoramento:
-    col_esquerda, col_direita = st.columns([1, 1.2])
+    col_esquerda, col_direita = st.columns([1, 1.8])
 
     with col_esquerda:
-        st.subheader("🔍 Filtros de Fluxo")
-        
-        # Renderização da Tabela de Retomada de Subida (Motor 2)
+        st.subheader("🔍 Ativos Selecionados")
+        st.caption("Clique na linha de qualquer tabela para carregar o gráfico instantaneamente.")
+
+        with st.spinner("Rodando scanner de mercado..."):
+            df_exaustao, df_retomada = processar_mercado_duplo()
+
+        # Ativo padrão de fallback caso nada seja selecionado
+        ativo_final = "EMBR3"
+
+        # 1. Tabela Interativa de Retomada com Captura de Clique
         st.markdown("**🚀 Top 5 - Retomada Confirmada de Alta**")
         if not df_retomada.empty:
-            st.dataframe(df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], use_container_width=True, hide_index=True)
+            sel_ret = st.dataframe(
+                df_retomada[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                use_container_width=True, hide_index=True,
+                selection_mode="single-row", on_select="rerun"
+            )
+            # Se o usuário clicar em uma linha, captura o ativo correspondente
+            if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
+                idx_linha = sel_ret["selection"]["rows"][0]
+                ativo_final = df_retomada.iloc[idx_linha]['Ativo']
         else:
-            st.info("Nenhuma ação confirmou reversão de alta neste ciclo.")
+            st.info("Nenhuma ação em reversão de alta.")
 
-        # Renderização da Tabela de Exaustão de Venda (Motor 1)
+        # 2. Tabela Interativa de Exaustão com Captura de Clique
         st.markdown("**💥 Top 5 - Clímax / Exaustão de Venda**")
         if not df_exaustao.empty:
-            st.dataframe(df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], use_container_width=True, hide_index=True)
+            sel_ex = st.dataframe(
+                df_exaustao[['Ativo', 'Preço (R$)', 'IFR', 'Vol_Ratio']], 
+                use_container_width=True, hide_index=True,
+                selection_mode="single-row", on_select="rerun"
+            )
+            if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
+                idx_linha = sel_ex["selection"]["rows"][0]
+                ativo_final = df_exaustao.iloc[idx_linha]['Ativo']
         else:
-            st.info("Nenhuma ação em pânico institucional extremo.")
-
-        # Caixa de Seleção Dinâmica para Análise Profunda
-        lista_selecao = list(df_retomada['Ativo']) + list(df_exaustao['Ativo'])
-        lista_selecao = list(set(lista_selecao)) # Remove duplicidades
-        
-        if not lista_selecao:
-            lista_selecao = ["CMIN3", "UGPA3", "EMBR3"] # Fallback de segurança com os ativos sugeridos
-            
-        ativo_selecionado = st.selectbox("Escolha um ativo para inspecionar:", lista_selecao)
+            st.info("Nenhuma ação em pânico institucional.")
 
     with col_direita:
-        st.subheader(f"📈 Gráfico Online: {ativo_selecionado}")
-        
-        try:
-            ticker_yf = f"{ativo_selecionado}.SA"
-            dados_grafico = yf.download(ticker_yf, period="5d", interval="15m", progress=False, auto_adjust=True, multi_level_index=False)
-            
-            if not dados_grafico.empty:
-                dados_grafico = dados_grafico.dropna(subset=['Close'])
-                preco_fechamento_atual = float(dados_grafico['Close'].iloc[-1])
-                
-                # Parametrização dinâmica de risco baseada na volatilidade recente (ATR)
-                high_low_historico = dados_grafico['High'] - dados_grafico['Low']
-                atr_contexto = float(high_low_historico.rolling(window=14).mean().iloc[-1])
-                distancia_stop = atr_contexto * 1.8 if atr_contexto > 0 else preco_fechamento_atual * 0.02
-                
-                stop_loss = preco_fechamento_atual - distancia_stop
-                alvo_lucro = preco_fechamento_atual + (distancia_stop * 1.5)
-                quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_fechamento_atual - stop_loss)) if (preco_fechamento_atual - stop_loss) > 0 else 0
+        st.subheader(f"📊 Análise Visual do Preço: {ativo_final}")
 
-                # Métricas em Cartões Visuais
+        # Controles Avançados do Gráfico solicitados pelo usuário
+        c1, c2 = st.columns(2)
+        with c1:
+            periodo_opcao = st.selectbox("Período Histórico:", ["1 dia (Intraday)", "Últimas Horas", "5 dias", "1 mês"])
+        with c2:
+            candle_opcao = st.selectbox("Tempo do Candle (Tempo Gráfico):", ["15 minutos", "5 minutos", "30 minutos", "1 hora", "1 dia", "1 semana"], index=0)
+
+        # Mapeamento de Parâmetros do Yahoo Finance com base nas opções selecionadas
+        map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
+        map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
+
+        periodo_yf = map_periodo[periodo_opcao]
+        candle_yf = map_candle[candle_opcao]
+
+        try:
+            ticker_yf = f"{ativo_final}.SA"
+            dados = yf.download(ticker_yf, period=periodo_yf, interval=candle_yf, progress=False, auto_adjust=True, multi_level_index=False)
+
+            if not dados.empty:
+                dados = dados.dropna(subset=['Close'])
+
+                # Filtro específico para a opção "Últimas Horas" (pega apenas os últimos 16 candles do dia)
+                if periodo_opcao == "Últimas Horas" and len(dados) > 16:
+                    dados = dados.tail(16)
+
+                preco_atual = float(dados['Close'].iloc[-1])
+
+                # Parâmetros de risco dinâmicos via ATR para as linhas guias do gráfico
+                high_low = dados['High'] - dados['Low']
+                atr_calc = float(high_low.rolling(window=14).mean().fillna(preco_atual * 0.01).iloc[-1])
+                
+                stop_loss = preco_atual - (atr_calc * 2)
+                alvo_lucro = preco_atual + (atr_calc * 1.5)
+                quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
+
+                # Adiciona Média Móvel de Referência de 20 períodos para apoio visual à decisão
+                dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean().fillna(dados['Close'])
+
+                # Métricas Rápidas na Tela
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Preço Atual", f"R$ {preco_fechamento_atual:.2f}")
-                m2.metric("Sugestão Stop Loss", f"R$ {stop_loss:.2f}")
+                m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
+                m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
                 m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
 
-                # Plotagem do Gráfico de Cotação de Linha Interativo nativo do Streamlit
-                st.line_chart(dados_grafico['Close'], y_label="Preço (R$)", x_label="Tempo (Candles 15m)")
-                
-                # Caixa de Gestão de Risco Quantitativa
-                st.success(f"🛡️ **Plano Ágora:** Compre até **{quantidade_lote} ações** para travar seu risco máximo em R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
+                # -----------------------------------------------------------------
+                # CONSTRUÇÃO DO GRÁFICO PROFISSIONAL (PLOTLY)
+                # -----------------------------------------------------------------
+                fig = go.Figure()
 
-                # Chamada para Contextualização de Sentimento com IA
-                with st.spinner("Consultando IA online sobre fatos recentes deste ativo..."):
-                    noticias_feed = buscar_noticias_reais_yfinance(ticker_yf)
-                    insight_ia = gerar_fato_ocorrido_por_ia(ativo_selecionado, preco_fechamento_atual, noticias_feed)
-                    
-                st.info(f"📰 **Contexto IA (Sentimento & Fatos):** {insight_ia}")
+                # Linha de Preço principal
+                fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Preço Fechamento', line=dict(color='#2ca02c', width=2.5)))
+                
+                # Linha da Média Móvel de Apoio
+                fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5, dash='solid')))
+
+                # Linhas Horizontais Estáticas de Alvo e Stop Loss para apoiar a decisão visual
+                fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo Lucro", annotation_position="top right")
+                fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop Loss", annotation_position="bottom right")
+
+                # ESTRELA DO GRÁFICO: Remoção cirúrgica dos horários em que o mercado fica parado
+                # O rangebreaks do Plotly retira gaps de noites e finais de semana
+                fig.update_xaxes(
+                    rangebreaks=[
+                        dict(bounds=["sat", "mon"]), # Oculta os finais de semana (Sábado e Domingo)
+                        dict(bounds=[18, 10], pattern="hour") # Oculta o período das 18:00 até às 10:00 da manhã seguinte
+                    ]
+                )
+
+                # Customização Estética do Layout para Modo Dark Elegante
+                fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    height=450,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para manter o risco fixado em R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
+
+                # Chamada da IA online para contextualização de suporte/resistência ou notícia
+                with St.spinner("Interpretando fatos de mercado..."):
+                    feed = buscar_noticias_reais_yfinance(ticker_yf)
+                    contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
+                st.info(f"📰 **Contexto IA:** {contexto_ia}")
+
             else:
-                st.error("Falha ao puxar cotações intraday para este ativo no momento.")
+                st.error("Sem dados de cotação para as combinações gráficas selecionadas.")
         except Exception as e:
-            st.error(f"Erro no processamento do gráfico online: {str(e)}")
+            st.error(f"Erro ao renderizar painel visual: {str(e)}")
 
 # ---------------------------------------------------------------------
 # ABA 2: HISTÓRICO DE SINAIS (AUDITORIA SQLITE)
 # ---------------------------------------------------------------------
 with tab_historico:
-    st.subheader("🗄️ Registro Geral de Sinais Armazenados")
-    st.markdown("_Todos os ativos identificados pelo scanner são gravados automaticamente abaixo para controle patrimonial_")
-    
-    # Carrega o histórico salvo diretamente do arquivo de banco de dados
-    df_historico_salvo = carregar_historico_banco()
-    
-    if not df_historico_salvo.empty:
-        # Formata colunas de preços para exibição monetária limpa
-        df_historico_salvo['preco_entrada'] = df_historico_salvo['preco_entrada'].map('R$ {:.2f}'.format)
-        df_historico_salvo['stop_loss'] = df_historico_salvo['stop_loss'].map('R$ {:.2f}'.format)
-        df_historico_salvo['alvo'] = df_historico_salvo['alvo'].map('R$ {:.2f}'.format)
-        
-        # Renomeia colunas para o usuário final
-        df_historico_salvo.columns = ['ID', 'Data/Hora Registro', 'Ativo', 'Estratégia Utilizada', 'Preço de Entrada', 'Preço de Stop', 'Preço Alvo', 'Status Operação']
-        
-        # Exibe a tabela interativa do banco com paginação nativa
-        st.dataframe(df_historico_salvo, use_container_width=True, hide_index=True)
+    st.subheader("🗄️ Histórico de Varreduras do Robô")
+    df_db = carregar_historico_banco()
+    if not df_db.empty:
+        df_db.columns = ['ID', 'Data/Hora', 'Ativo', 'Estratégia', 'Preço Entrada', 'Stop Loss', 'Alvo', 'Status']
+        st.dataframe(df_db, use_container_width=True, hide_index=True)
     else:
-        st.info("O banco de dados está pronto, mas nenhum sinal foi disparado neste ciclo de mercado ainda.")
+        st.info("Nenhum registro gravado nas tabelas locais até o momento.")
