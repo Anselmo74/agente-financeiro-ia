@@ -37,7 +37,7 @@ CHAT_ID_TELEGRAM = st.secrets.get("CHAT_ID_TELEGRAM", "8852525281")
 API_KEY_IA = st.secrets.get("API_KEY_IA", "fd10bd41-3d8f-50da-8a73-716eef2ec764")
 
 # Endpoint oficial Corrigido de Chat Completions no OpenRouter
-URL_IA_PROXIMIDADE = "https://openrouter.ai"
+URL_IA_PROXIMIDADE = "https://openrouter.ai/api/v1/chat/completions"
 
 # Parâmetros de Gestão de Risco Blindada
 RISCO_MAXIMO_FINANCEIRO = 1000.00
@@ -122,7 +122,8 @@ def enviar_alerta_telegram(ticker, estrategia, preco, stop, alvo):
         f"📅 *Data/Hora:* {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
     )
     
-    url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+    # CORREÇÃO CRÍTICA: URL do Telegram corrigida
+    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
     payload = {"chat_id": CHAT_ID_TELEGRAM, "text": mensagem, "parse_mode": "Markdown"}
     
     try:
@@ -329,10 +330,12 @@ def gerar_fato_ocorrido_por_ia(ticker, preco, manchetes_reais):
         "messages": [{"role": "user", "content": prompt}]
     }
     try:
+        # CORREÇÃO CRÍTICA: URL completa do OpenRouter
         response = requests.post(URL_IA_PROXIMIDADE, headers=headers, json=data, timeout=8)
         if response.status_code == 200:
-            return response.json()['choices']['message']['content'].strip()
-    except: pass
+            return response.json()['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        print(f"Erro ao consultar IA: {e}")
     return f"Ajuste técnico de carteiras institucionais perto de R$ {preco:.2f}."
 
 # =====================================================================
@@ -369,8 +372,9 @@ if RODANDO_NO_STREAMLIT:
                     selection_mode="single-row", on_select="rerun",
                     key="tabela_retomada"
                 )
+                # CORREÇÃO CRÍTICA: Acesso correto ao índice
                 if sel_ret.get("selection") and sel_ret["selection"]["rows"]:
-                    idx = sel_ret["selection"]["rows"]
+                    idx = sel_ret["selection"]["rows"][0]
                     st.session_state["ativo_selecionado"] = str(df_retomada.iloc[idx]['Ativo']).strip()
             else:
                 st.info("Nenhuma ação em reversão de alta.")
@@ -384,8 +388,9 @@ if RODANDO_NO_STREAMLIT:
                     selection_mode="single-row", on_select="rerun",
                     key="tabela_exaustao"
                 )
+                # CORREÇÃO CRÍTICA: Acesso correto ao índice
                 if sel_ex.get("selection") and sel_ex["selection"]["rows"]:
-                    idx = sel_ex["selection"]["rows"]
+                    idx = sel_ex["selection"]["rows"][0]
                     st.session_state["ativo_selecionado"] = str(df_exaustao.iloc[idx]['Ativo']).strip()
             else:
                 st.info("Nenhuma ação em pânico institucional.")
@@ -423,65 +428,88 @@ if RODANDO_NO_STREAMLIT:
                     
                     dados = dados.dropna(subset=['Close', 'High', 'Low']).copy()
 
-                    # CÁLCULO MESTRE DE RISCO (Antes de fatiar os dados visuais)
-                    preco_atual = float(dados['Close'].iloc[-1])
-                    high_low = dados['High'] - dados['Low']
-                    dados['ATR'] = high_low.rolling(window=14).mean()
-                    
-                    atr_calc = float(dados['ATR'].fillna(preco_atual * 0.015).iloc[-1])
-                    stop_loss = preco_atual - (atr_calc * 2)
-                    alvo_lucro = preco_atual + (atr_calc * 1.5)
-                    quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / (preco_atual - stop_loss)) if (preco_atual - stop_loss) > 0 else 0
+                    # VALIDAÇÃO CRÍTICA: Verifica se há dados suficientes para cálculo de ATR
+                    if len(dados) < 14:
+                        st.error(f"⚠️ Dados insuficientes ({len(dados)} < 14 períodos). Tente outro período ou intervalo.")
+                    else:
+                        # CÁLCULO MESTRE DE RISCO (Antes de fatiar os dados visuais)
+                        preco_atual = float(dados['Close'].iloc[-1])
+                        high_low = dados['High'] - dados['Low']
+                        dados['ATR'] = high_low.rolling(window=14).mean()
+                        
+                        atr_calc = float(dados['ATR'].fillna(preco_atual * 0.015).iloc[-1])
+                        
+                        # CORREÇÃO CRÍTICA: Validação segura do cálculo de stop_loss e alvo
+                        if atr_calc > 0:
+                            stop_loss = preco_atual - (atr_calc * 2)
+                            alvo_lucro = preco_atual + (atr_calc * 1.5)
+                        else:
+                            # Fallback com percentual conservador
+                            stop_loss = preco_atual * 0.98
+                            alvo_lucro = preco_atual * 1.02
+                        
+                        # CORREÇÃO CRÍTICA: Validação de divisão por zero
+                        risco_por_acao = abs(preco_atual - stop_loss)
+                        if risco_por_acao > 0:
+                            quantidade_lote = int(RISCO_MAXIMO_FINANCEIRO / risco_por_acao)
+                        else:
+                            quantidade_lote = 0
 
-                    dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean()
+                        dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean()
 
-                    if periodo_opcao == "Últimas Horas" and len(dados) > 16:
-                        dados = dados.tail(16)
+                        if periodo_opcao == "Últimas Horas" and len(dados) > 16:
+                            dados = dados.tail(16)
 
-                    # Métricas Rápidas na Tela
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
-                    m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
-                    m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
+                        # Métricas Rápidas na Tela
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
+                        m2.metric("Stop Loss Recomendado", f"R$ {stop_loss:.2f}")
+                        m3.metric("Alvo do Trade", f"R$ {alvo_lucro:.2f}")
 
-                    # Construção do Gráfico Plotly Modo Dark
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Fechamento', line=dict(color='#2ca02c', width=2.5)))
-                    
-                    if not dados['Média Ref (20)'].isna().all():
-                        fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5)))
+                        # Construção do Gráfico Plotly Modo Dark
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=dados.index, y=dados['Close'], name='Fechamento', line=dict(color='#2ca02c', width=2.5)))
+                        
+                        if not dados['Média Ref (20)'].isna().all():
+                            fig.add_trace(go.Scatter(x=dados.index, y=dados['Média Ref (20)'], name='Média Móvel (20)', line=dict(color='#ff7f0e', width=1.5)))
 
-                    fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo")
-                    fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop")
+                        fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo")
+                        fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop")
 
-                    # PROTEÇÃO TEMPORAL: Aplica rangebreaks APENAS em dados intradiários
-                    if candle_yf not in ["1d", "1wk"]:
-                        fig.update_xaxes(
-                            rangebreaks=[
-                                dict(bounds=["sat", "mon"]),
-                                dict(bounds=[18, 10], pattern="hour")
-                            ]
+                        # PROTEÇÃO TEMPORAL: Aplica rangebreaks APENAS em dados intradiários
+                        if candle_yf not in ["1d", "1wk"]:
+                            fig.update_xaxes(
+                                rangebreaks=[
+                                    dict(bounds=["sat", "mon"]),
+                                    dict(bounds=[18, 10], pattern="hour")
+                                ]
+                            )
+
+                        fig.update_layout(
+                            template="plotly_dark",
+                            margin=dict(l=20, r=20, t=25, b=20),
+                            height=450,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                         )
 
-                    fig.update_layout(
-                        template="plotly_dark",
-                        margin=dict(l=20, r=20, t=25, b=20),
-                        height=450,
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                    )
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Display position management info
+                        if quantidade_lote > 0:
+                            st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para risco de R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
+                        else:
+                            st.warning("⚠️ Risco insuficiente para calcular lote. Verifique os valores de stop loss e preço atual.")
 
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.success(f"🛡️ **Gestão de Posição:** Opere no máximo **{quantidade_lote} ações** para risco de R$ {RISCO_MAXIMO_FINANCEIRO:.2f}.")
-
-                    with st.spinner("Interpretando fatos de mercado..."):
-                        feed = buscar_noticias_reais_yfinance(ticker_yf)
-                        contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
-                    st.info(f"📰 **Contexto IA:** {contexto_ia}")
+                        with st.spinner("Interpretando fatos de mercado..."):
+                            feed = buscar_noticias_reais_yfinance(ticker_yf)
+                            contexto_ia = gerar_fato_ocorrido_por_ia(ativo_final, preco_atual, feed)
+                        st.info(f"📰 **Contexto IA:** {contexto_ia}")
 
                 else:
                     st.error("Sem dados de cotação disponíveis para este ativo no momento.")
             except Exception as e:
                 st.error(f"Erro ao renderizar painel visual: {str(e)}")
+                print(f"Detalhes do erro: {e}")
 
     # =====================================================================
     # ABA 2: HISTÓRICO DE SINAIS E MÓDULO DE PERFORMANCE (PAYOFF / WIN RATE)
