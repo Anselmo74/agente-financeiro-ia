@@ -41,7 +41,7 @@ URL_IA_PROXIMIDADE = "https://openrouter.ai"
 
 # Parâmetros de Gestão de Risco Blindada
 RISCO_MAXIMO_FINANCEIRO = 1000.00
-LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro de corte dinâmico (> R$ 1 Milhão/dia)
+LIMITE_LIQUIDEZ_DIARIA = 1000000.00  # Filtro mínimo dinâmico de R$ 1 Milhão/dia
 DB_NAME = "trades_historico.db"
 
 # =====================================================================
@@ -232,7 +232,7 @@ def calcular_dados_mercado():
             fechamentos = df['Close'].squeeze()
             volumes = df['Volume'].squeeze()
 
-            # Cálculo de liquidez: média do volume financeiro intradiário projetado para o dia inteiro
+            # Métrica de liquidez intradiária projetada
             df['Vol_Financeiro'] = fechamentos * volumes
             liquidez_diaria = float(df['Vol_Financeiro'].rolling(window=100).mean().iloc[-1]) * 28
 
@@ -393,7 +393,6 @@ if RODANDO_NO_STREAMLIT:
         # Resgata o ativo estável selecionado pelo investidor para processamento gráfico
         ativo_final = st.session_state["ativo_selecionado"]
 
-
         # =====================================================================
         # INTERFACE VISUAL AVANÇADA - PARTE 4B (PLOTLY E PERFORMANCE)
         # =====================================================================
@@ -410,7 +409,6 @@ if RODANDO_NO_STREAMLIT:
             map_periodo = {"1 dia (Intraday)": "1d", "Últimas Horas": "1d", "5 dias": "5d", "1 mês": "1mo"}
             map_candle = {"5 minutos": "5m", "15 minutos": "15m", "30 minutos": "30m", "1 hora": "1h", "1 dia": "1d", "1 semana": "1wk"}
 
-            # Ajusta período para evitar erros de histórico curto no yfinance
             periodo_yf = "3mo" if map_candle[candle_opcao] in ["1d", "1wk"] else map_periodo[periodo_opcao]
             candle_yf = map_candle[candle_opcao]
 
@@ -419,6 +417,10 @@ if RODANDO_NO_STREAMLIT:
                 dados = yf.download(ticker_yf, period=periodo_yf, interval=candle_yf, progress=False, auto_adjust=True, multi_level_index=False)
 
                 if not dados.empty:
+                    # CORREÇÃO CRÍTICA DO PLOTLY: Força a remoção de fuso horário do índice datetime do pandas
+                    if dados.index.tz is not None:
+                        dados.index = dados.index.tz_localize(None)
+                    
                     dados = dados.dropna(subset=['Close', 'High', 'Low']).copy()
 
                     # CÁLCULO MESTRE DE RISCO (Antes de fatiar os dados visuais)
@@ -433,7 +435,6 @@ if RODANDO_NO_STREAMLIT:
 
                     dados['Média Ref (20)'] = dados['Close'].rolling(window=20).mean()
 
-                    # Filtro exclusivo de exibição em tela para a opção "Últimas Horas"
                     if periodo_opcao == "Últimas Horas" and len(dados) > 16:
                         dados = dados.tail(16)
 
@@ -453,7 +454,7 @@ if RODANDO_NO_STREAMLIT:
                     fig.add_hline(y=alvo_lucro, line_dash="dash", line_color="#2ca02c", annotation_text="Alvo")
                     fig.add_hline(y=stop_loss, line_dash="dash", line_color="#d62728", annotation_text="Stop")
 
-                    # PROTEÇÃO TEMPORAL CRÍTICA: Aplica rangebreaks APENAS em dados intradiários
+                    # PROTEÇÃO TEMPORAL: Aplica rangebreaks APENAS em dados intradiários
                     if candle_yf not in ["1d", "1wk"]:
                         fig.update_xaxes(
                             rangebreaks=[
